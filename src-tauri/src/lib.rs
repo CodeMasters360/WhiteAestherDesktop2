@@ -1,0 +1,447 @@
+mod carrier;
+mod carrier_probe;
+mod chain;
+mod core_supervisor;
+mod elevation;
+mod http_bridge;
+mod iran_routes;
+mod identity_backup;
+mod lan_share;
+mod latency;
+mod mim_identity;
+mod moat;
+mod psiphon;
+mod race;
+mod recovery;
+mod route_memory;
+mod scanner;
+mod system_proxy;
+mod tls;
+mod tls_options;
+mod tor;
+
+use chain::Chain;
+use core_supervisor::CoreSupervisor;
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager,
+};
+
+/// The tray icon's id, used to create it and to take it away again.
+///
+/// Windows keeps showing a tray icon after the process that owns it is gone --
+/// it only notices on the next hover -- so every path that ends this process
+/// has to remove the icon itself. A build installed over a running copy is the
+/// common way to collect a row of dead icons.
+const TRAY_ID: &str = "whiteaesther";
+
+/// Takes the tray icon away before the process goes.
+///
+/// Idempotent, and safe to call from every exit path: removing an icon that has
+/// already gone does nothing.
+fn remove_tray(app: &AppHandle) {
+    app.remove_tray_by_id(TRAY_ID);
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainStatus {
+    running: bool,
+    /// Where applications and the system proxy point while the chain carries
+    /// traffic. None means the tunnel is carrying it directly.
+    address: Option<String>,
+}
+
+/// Whether the second hop is up, and what it is listening on.
+#[tauri::command]
+async fn chain_status(chain: tauri::State<'_, Chain>) -> Result<ChainStatus, String> {
+    Ok(ChainStatus {
+        running: chain.is_running(),
+        address: chain.address().map(|value| value.to_string()),
+    })
+}
+
+/// What the Psiphon carrier is doing, including the exit countries it has.
+///
+/// The country list is Psiphon's own answer rather than a table of ours, so it
+/// is empty until the first successful connect -- which is honest: we do not
+/// know what it has until it tells us. The screen says "best available" until
+/// then rather than offering countries it cannot promise.
+#[tauri::command]
+fn psiphon_status(psiphon: tauri::State<'_, psiphon::Psiphon>) -> psiphon::PsiphonSnapshot {
+    psiphon.snapshot()
+}
+
+/// The carrier's raw notice stream, for a diagnostics report.
+#[tauri::command]
+fn psiphon_notices(psiphon: tauri::State<'_, psiphon::Psiphon>) -> Vec<String> {
+    psiphon.notices()
+}
+
+/// What Tor is doing, including how far bootstrapping has got.
+///
+/// The progress is worth showing rather than hiding behind a spinner: building
+/// a circuit through a bridge can take tens of seconds, and a percentage that
+/// is visibly moving is the difference between waiting and giving up.
+#[tauri::command]
+fn tor_status(tor: tauri::State<'_, tor::Tor>) -> tor::TorSnapshot {
+    tor.snapshot()
+}
+
+/// Tor's own output, for a diagnostics report.
+#[tauri::command]
+fn tor_log(tor: tauri::State<'_, tor::Tor>) -> Vec<String> {
+    tor.lines()
+}
+
+/// Which carriers this build can actually run.
+///
+/// Not every build ships every carrier: Tor publishes no expert bundle for
+/// arm64 Windows or Linux, so a build for those targets has Aether and Psiphon
+/// and nothing else. The screen reads this rather than offering a way out that
+/// cannot start — a control that saves and does nothing is worse than one that
+/// is absent.
+#[tauri::command]
+fn carriers_available(app: AppHandle) -> Vec<String> {
+    carriers_installed(&app)
+        .into_iter()
+        .map(|kind| kind.proxy_name().to_string())
+        .collect()
+}
+
+/// What this build actually ships, as the kinds the rest of the crate speaks.
+///
+/// The screen reads the string form above; the race reads this. One answer
+/// behind both, so a carrier the picker hides can never be one a race starts.
+pub(crate) fn carriers_installed(app: &AppHandle) -> Vec<carrier::CarrierKind> {
+    let mut available = vec![carrier::CarrierKind::Aether];
+    if psiphon::is_available(app) {
+        available.push(carrier::CarrierKind::Psiphon);
+    }
+    if tor::is_available(app) {
+        available.push(carrier::CarrierKind::Tor);
+    }
+    available
+}
+
+/// Asks Tor's circumvention service which bridges work in a given country.
+///
+/// Goes out through whichever carrier is up, when one is: the service is itself
+/// blocked in most of the places its answer is wanted, so asking directly there
+/// returns nothing and reads as the service being down.
+///
+/// The country is the user's own, and is asked for rather than inferred. A
+/// desktop has no SIM to read one from, and guessing from the current exit
+/// address would ask about whichever country the carrier is leaving from —
+/// which is the one place the answer does not apply.
+#[tauri::command]
+async fn fetch_bridges(
+    app: AppHandle,
+    supervisor: tauri::State<'_, CoreSupervisor>,
+    country: String,
+) -> Result<Vec<String>, String> {
+    let carrier = supervisor.carrier(&app).map(|carrier| carrier.socks);
+    tauri::async_runtime::spawn_blocking(move || moat::fetch_bridges(&country, carrier))
+        .await
+        .map_err(|error| format!("the bridge request did not finish: {error}"))?
+}
+
+/// Every node the chain knows about, with the delay each last recorded.
+#[tauri::command]
+async fn chain_nodes(
+    app: AppHandle,
+    chain: tauri::State<'_, Chain>,
+    supervisor: tauri::State<'_, CoreSupervisor>,
+) -> Result<Vec<chain::ChainNode>, String> {
+    // Whether a QUIC node behind the tunnel can work at all is a property of
+    // the whole chain, not of one transport: one hop that refuses datagrams
+    // settles it for every hop behind it.
+    chain.nodes(supervisor.carries_quic(&app))
+}
+
+/// Measures one node through the tunnel.
+///
+/// The same call answers "does this config work from here" and "how fast is
+/// it", because the probe travels the node's own dialer-proxy: a number means
+/// it is usable behind the tunnel, and nothing means it is not.
+#[tauri::command]
+async fn chain_test(
+    chain: tauri::State<'_, Chain>,
+    source: String,
+    node: String,
+) -> Result<Option<u32>, String> {
+    chain.test(&source, &node)
+}
+
+#[tauri::command]
+async fn chain_select(chain: tauri::State<'_, Chain>, node: String) -> Result<(), String> {
+    chain.select(&node)
+}
+
+/// Shrinks the window to the screen when the screen is smaller than it.
+///
+/// The configured size is what suits a desktop monitor, and nothing clamps it
+/// to the display it actually opens on -- so on a 720x1280 panel the window
+/// opened at 1340 wide with half of it off the edge, and a `minWidth` of 960
+/// meant it could not be dragged back (#51). The minimum is lower now, but a
+/// window that opens wrong and has to be resized by hand every launch is still
+/// a window that opens wrong.
+///
+/// Only ever shrinks. Growing a window someone has sized themselves is not this
+/// function's business, and the margin leaves room for a taskbar or a panel
+/// that `monitor.size()` does not account for.
+fn fit_to_screen(window: &tauri::WebviewWindow) {
+    const MARGIN: u32 = 80;
+
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let screen = monitor.size();
+    let width = size.width.min(screen.width.saturating_sub(MARGIN));
+    let height = size.height.min(screen.height.saturating_sub(MARGIN));
+    if width < size.width || height < size.height {
+        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+        let _ = window.center();
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        fit_to_screen(&window);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            show_main_window(app);
+        }
+    }
+}
+
+/// Stops WebKitGTK trying to render through DMABUF, which on several Linux
+/// setups produces a window that never draws.
+///
+/// The symptom is a white or blank window and, if anything reaches the
+/// terminal, `Could not create default EGL display: EGL_BAD_PARAMETER`. It is
+/// not our rendering: WebKitGTK's DMABUF path does not work against some
+/// driver and compositor combinations, and Arch-based distributions hit it
+/// often enough that two of the three blank-window reports here came from them
+/// (#48 on CachyOS, #53 on Arch) with a third that reads the same (#44).
+///
+/// Set here rather than written in the install notes, because a person whose
+/// window is blank has nothing to read the notes *in*. An environment variable
+/// they would have to know to export is not a fix, it is a fact they have to
+/// discover -- and the ones who do not simply conclude the app is broken.
+///
+/// Only ever set when the variable is absent, so anyone deliberately testing
+/// the other path still can. Linux only: the variable means nothing elsewhere,
+/// and WebKitGTK is not what draws the window there.
+#[cfg(target_os = "linux")]
+fn keep_the_window_from_going_blank() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn keep_the_window_from_going_blank() {}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Before the builder, because the webview reads this when it is created and
+    // setting it afterwards would be setting it too late.
+    keep_the_window_from_going_blank();
+
+    tauri::Builder::default()
+        // Before anything else, so a second launch never reaches setup(). Its
+        // proxy recovery would revert the settings the running copy applied,
+        // and its window would report "Not connected" over a live tunnel.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(CoreSupervisor::new())
+        .manage(Chain::new())
+        .manage(psiphon::Psiphon::new())
+        .manage(tor::Tor::new())
+        .manage(lan_share::LanDoor::default())
+        .setup(|app| {
+            // A previous run that was killed rather than closed may have left
+            // the system proxy pointing at a listener that is now gone, which
+            // takes the machine off the network until it is put back.
+            match system_proxy::recover(app.handle()) {
+                Ok(true) => eprintln!("restored the system proxy left by an earlier run"),
+                Ok(false) => {}
+                Err(error) => eprintln!("could not restore the system proxy: {error}"),
+            }
+
+            // Full tunnel restarts this app elevated, and from then on the
+            // desktop shortcut is at a lower integrity level than the copy it
+            // is trying to wake. Windows blocks messages sent up that gradient,
+            // so without this a click on the icon found the running copy and
+            // silently failed to reach it.
+            elevation::allow_launches_from_an_ordinary_user(&app.config().identifier);
+
+            // One thread delivers logs and status to the window on a timer, so
+            // the core's own progress never waits on the interface.
+            core_supervisor::start_pump(app.handle().clone(), &app.state::<CoreSupervisor>());
+
+            let open = MenuItem::with_id(app, "open", "Open WhiteAesther", true, None::<&str>)?;
+            let connection = MenuItem::with_id(
+                app,
+                "toggle-connection",
+                "Connect / Disconnect",
+                true,
+                None::<&str>,
+            )?;
+            let diagnostics =
+                MenuItem::with_id(app, "diagnostics", "Open Diagnostics", true, None::<&str>)?;
+            // Reachable with the window hidden, which is exactly the state
+            // someone is in when the kill switch has blocked their traffic and
+            // they are looking for the way out.
+            let restore = MenuItem::with_id(
+                app,
+                "restore-proxy",
+                "Restore system proxy",
+                true,
+                None::<&str>,
+            )?;
+            let hide = MenuItem::with_id(app, "hide", "Hide WhiteAesther", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit WhiteAesther", true, None::<&str>)?;
+            let menu = Menu::with_items(
+                app,
+                &[&open, &connection, &restore, &diagnostics, &hide, &separator, &quit],
+            )?;
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or("application icon is unavailable")?;
+
+            TrayIconBuilder::with_id(TRAY_ID)
+                .icon(icon)
+                .tooltip(format!("WhiteAesther {}", app.package_info().version))
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => show_main_window(app),
+                    "hide" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    "toggle-connection" => {
+                        let _ = app.emit("tray-action", "toggle-connection");
+                    }
+                    "restore-proxy" => {
+                        let _ = app.emit("tray-action", "restore-proxy");
+                    }
+                    "diagnostics" => {
+                        show_main_window(app);
+                        let _ = app.emit("tray-action", "open-diagnostics");
+                    }
+                    "quit" => {
+                        app.state::<CoreSupervisor>().shutdown(app);
+                        remove_tray(app);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        toggle_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            tauri::WindowEvent::Destroyed => {
+                let app = window.app_handle();
+                app.state::<CoreSupervisor>().shutdown(app);
+            }
+            _ => {}
+        })
+        .invoke_handler(tauri::generate_handler![
+            core_supervisor::runtime_info,
+            core_supervisor::probe_core,
+            core_supervisor::start_core,
+            core_supervisor::stop_core,
+            core_supervisor::core_status,
+            core_supervisor::core_logs,
+            core_supervisor::save_profile,
+            core_supervisor::load_profile,
+            core_supervisor::save_report,
+            core_supervisor::set_system_proxy,
+            core_supervisor::set_chain,
+            core_supervisor::set_full_tunnel,
+            core_supervisor::full_tunnel_is_permitted,
+            core_supervisor::resuming_full_tunnel,
+            core_supervisor::restart_as_administrator,
+            core_supervisor::set_lan_share,
+            core_supervisor::set_psiphon_region,
+            core_supervisor::lan_share_status,
+            scanner::scan_endpoints,
+            scanner::test_endpoint,
+            scanner::cancel_scan,
+            latency::probe_latency,
+            carrier_probe::probe_carrier,
+            race::race_carriers,
+            identity_backup::backup_identity,
+            identity_backup::restore_identity,
+            latency::speed_test,
+            latency::exit_info,
+            chain_status,
+            chain_nodes,
+            chain_test,
+            chain_select,
+            psiphon_status,
+            psiphon_notices,
+            tor_status,
+            tor_log,
+            carriers_available,
+            fetch_bridges,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while running WhiteAesther")
+        // prevent_close() above means WindowEvent::Destroyed never fires, so it was never a
+        // cleanup path — Cmd+Q, Dock Quit and logout all exited here instead, orphaning a live
+        // core (std::process::Child does not kill on drop). shutdown() is idempotent.
+        // ponytail: cannot cover SIGKILL/OOM — that needs a pid file reaped at next launch.
+        .run(|app, event| {
+            match event {
+                // Asked to go: an installer replacing this build, a logout, or
+                // a quit from the dock. The icon has to be withdrawn while
+                // there is still a process to withdraw it.
+                tauri::RunEvent::ExitRequested { .. } => remove_tray(app),
+                tauri::RunEvent::Exit => {
+                    app.state::<CoreSupervisor>().shutdown(app);
+                    remove_tray(app);
+                }
+                _ => {}
+            }
+        });
+}

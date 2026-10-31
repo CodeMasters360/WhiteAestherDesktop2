@@ -1,0 +1,2041 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useT } from "@/core/useT";
+import {
+  Activity, FileText, Globe, Link2, Route as RouteIcon, Scale, ShieldCheck, Wifi, type LucideIcon,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import { buildCoreCommand } from "@/core/command";
+import { endpointError, normalizeEndpoint } from "@/core/endpoint";
+import { REPORT_EVENT_LIMIT, buildReport, reportFilename } from "@/core/report";
+import {
+  type LanStatus,
+  carriersAvailable,
+  fetchBridges,
+  isDesktopRuntime,
+  getCoreStatus,
+  lanShareStatus,
+  probeCarrier,
+  psiphonStatus,
+  backupIdentity,
+  raceCarriers,
+  restoreIdentity,
+  saveReport,
+  setLanShare,
+  setPsiphonRegion,
+  startCore,
+  stopCore,
+} from "@/core/api";
+import { skippedByFullTunnel } from "@/core/doh";
+import { profileForWinner } from "@/core/winner";
+import {
+  SETTLE_POLL_MS, attemptCapMs, isImpossible, searchBudgetMs, searchOrder, verdictFor,
+  type SearchAttempt,
+} from "./carrierSearch";
+import { NumberField, Row, RulesField, Seg, TextField } from "./panels";
+import { Chain } from "./Chain";
+import { Scanner } from "./Scanner";
+import { transportName } from "./Simple";
+// Bundled into the app rather than read from disk at runtime: the obligation is
+// to ship these words with the binary, and a file read that can fail is not
+// that. The same text is installed beside the executable under licences/.
+import notices from "../../THIRD_PARTY_NOTICES.md?raw";
+import {
+  ENDPOINT_MODES, carrierChainHas, carrierChainLabel, carrierChainLast, isLoneAether,
+  type CarrierKind,
+  type ConnectionProfile, type LanSettings, type CoreLogEvent, type CoreProbe, type CoreSnapshot,
+} from "@/types";
+
+type SectionId =
+  | "status"
+  | "routes"
+  | "endpoint"
+  | "chain"
+  | "traffic"
+  | "identity"
+  | "diagnostics"
+  | "licences";
+
+const SECTIONS: Array<{ group: string; items: Array<{ id: SectionId; label: string; icon: LucideIcon }> }> = [
+  { group: "Connection", items: [
+    { id: "status", label: "Status", icon: Activity },
+    { id: "routes", label: "Routes & transports", icon: RouteIcon },
+    { id: "endpoint", label: "Endpoint", icon: Globe },
+    { id: "chain", label: "Exit chain", icon: Link2 },
+  ] },
+  { group: "System", items: [
+    { id: "traffic", label: "Traffic & DNS", icon: Wifi },
+    { id: "identity", label: "Identity", icon: ShieldCheck },
+  ] },
+  { group: "Support", items: [
+    { id: "diagnostics", label: "Diagnostics", icon: FileText },
+    { id: "licences", label: "Licences & notices", icon: Scale },
+  ] },
+];
+
+const BLURB: Record<SectionId, string> = {
+  status: "What the core is doing right now.",
+  routes: "How hard to search, what the tunnel rides on, and how it hides.",
+  endpoint: "Pin a specific gateway, or let the core find one.",
+  chain: "Send the tunnel's traffic on through a node of your own, so the address you appear from changes.",
+  traffic: "Where traffic goes once the tunnel is up.",
+  identity: "Cloudflare Zero Trust enrolment, and a backup of this device's identity.",
+  diagnostics: "The core executable, logging, and a report you can hand to someone.",
+  licences: "What WhiteAesther is built on, under what terms, and where to get the source.",
+};
+
+export interface AdvancedProps {
+  profile: ConnectionProfile;
+  onChange: (profile: ConnectionProfile) => void;
+  snapshot: CoreSnapshot;
+  probe: CoreProbe;
+  logs: CoreLogEvent[];
+  runtime: string;
+  appVersion: string;
+  onSave: () => void;
+  onToast: (title: string, message: string, error?: boolean) => void;
+  /**
+   * Set by settings search. Carries a nonce as well as the section, because
+   * searching for the same setting twice has to move there both times, and an
+   * effect keyed on the section alone would only fire the first time.
+   */
+  jumpTo?: { section: SectionId; at: number } | null;
+}
+
+/**
+ * The sections that only describe the Aether engine.
+ *
+ * "Endpoint" is pinning a Cloudflare gateway, which Psiphon and Tor neither
+ * read nor have. Hidden rather than shown-and-inert, for the same reason the
+ * transport cards are.
+ */
+const AETHER_ONLY_SECTIONS: SectionId[] = ["endpoint"];
+
+export function Advanced(props: AdvancedProps) {
+  const t = useT();
+  const [section, setSection] = useState<SectionId>("status");
+  const aetherOnly = isLoneAether(props.profile.carriers);
+
+  // Someone who was reading Endpoint and then switched carrier would otherwise
+  // be left looking at a section that is no longer in the list.
+  useEffect(() => {
+    if (!aetherOnly && AETHER_ONLY_SECTIONS.includes(section)) setSection("routes");
+  }, [aetherOnly, section]);
+
+  const { jumpTo } = props;
+  useEffect(() => {
+    if (jumpTo) setSection(jumpTo.section);
+  }, [jumpTo]);
+  const heading = SECTIONS.flatMap((group) => group.items).find((item) => item.id === section);
+
+  return (
+    <div className="grid h-full grid-cols-[196px_minmax(0,1fr)] overflow-hidden">
+      <nav className="flex flex-col gap-0.5 overflow-y-auto border-r bg-card p-2" aria-label={t("Settings sections")}>
+        {SECTIONS.map((group) => (
+          <div key={group.group} className="flex flex-col gap-0.5">
+            <span className="px-2.5 pb-1 pt-3.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {t(group.group)}
+            </span>
+            {group.items
+              .filter(({ id }) => aetherOnly || !AETHER_ONLY_SECTIONS.includes(id))
+              .map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                aria-current={section === id}
+                onClick={() => setSection(id)}
+                className={[
+                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-start text-[13.5px] transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  section === id
+                    ? "bg-primary/10 font-semibold text-primary"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                ].join(" ")}
+              >
+                <Icon className="size-[15px]" />
+                {t(label)}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+
+      <div className="flex flex-col gap-4 overflow-y-auto p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col gap-1">
+            <h2 className="text-[19px] font-semibold tracking-tight">{heading ? t(heading.label) : null}</h2>
+            <p className="text-sm text-muted-foreground">{t(BLURB[section])}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <StateBadge snapshot={props.snapshot} />
+            <Button variant="outline" size="sm" onClick={props.onSave}>
+              {t("Save profile")}
+            </Button>
+          </div>
+        </div>
+
+        {section === "status" && <Status {...props} />}
+        {section === "routes" && <Routes {...props} />}
+        {section === "endpoint" && <Endpoint {...props} />}
+        {section === "chain" && (
+          <Chain
+            profile={props.profile}
+            onChange={props.onChange}
+            connected={props.snapshot.state === "connected"}
+            onToast={props.onToast}
+          />
+        )}
+        {section === "traffic" && <Traffic {...props} />}
+        {section === "identity" && <Identity {...props} />}
+        {section === "diagnostics" && <Diagnostics {...props} />}
+        {section === "licences" && <Licences />}
+      </div>
+    </div>
+  );
+}
+
+function StateBadge({ snapshot }: { snapshot: CoreSnapshot }) {
+  const t = useT();
+  if (snapshot.state === "connected")
+    return <Badge variant="ok" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Connected")}</Badge>;
+  if (snapshot.state === "error")
+    return <Badge variant="bad" className="gap-1.5"><span className="size-1.5 rounded-full bg-current" />{t("Stopped")}</Badge>;
+  if (snapshot.state === "idle") return <Badge variant="outline">{t("Idle")}</Badge>;
+  return (
+    <Badge variant="warn" className="gap-1.5">
+      <span className="size-1.5 animate-pulse rounded-full bg-current" />
+      {snapshot.attempt > 0 ? `${t("Attempt")} ${snapshot.attempt}/${snapshot.maxAttempts}` : t("Working")}
+    </Badge>
+  );
+}
+
+// ---------------------------------------------------------------------- status
+
+function Status({ snapshot, probe, logs, profile }: AdvancedProps) {
+  const t = useT();
+  return (
+    <>
+      <div className="grid grid-cols-4 gap-3">
+        <Metric label="Core" value={probe.available ? "Ready" : t("Missing")} />
+        <Metric label="Transport" value={snapshot.transport ? transportName(snapshot.transport) : "—"} />
+        <Metric label="Edge" value={snapshot.endpoint ?? "—"} mono />
+        <Metric label="Latency" value={snapshot.latencyMs == null ? "—" : `${snapshot.latencyMs.toFixed(1)} ms`} mono />
+      </div>
+
+      <Card>
+        <CardHeader className="pb-2"><CardTitle className="text-[15px]">{t("Live")}</CardTitle></CardHeader>
+        <CardContent><LogList logs={logs} /></CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-[15px]">{t("What will run")}</CardTitle>
+          <CardDescription>
+            {t(
+              "The core is launched with these arguments. Zero Trust secrets go through the environment and are not shown here.",
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 p-3 font-mono text-[11.5px] leading-relaxed text-foreground/80">
+            {buildCoreCommand(profile)}
+          </pre>
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  const t = useT();
+  return (
+    <Card className="p-3.5">
+      <div className="flex flex-col gap-1">
+        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">{t(label)}</span>
+        <span className={`truncate text-[15px] font-medium ${mono ? "tabular font-mono" : ""}`}>{value}</span>
+      </div>
+    </Card>
+  );
+}
+
+const LEVEL: Record<string, string> = {
+  error: "text-destructive",
+  warn: "text-warning",
+  info: "text-primary",
+  debug: "text-muted-foreground",
+  trace: "text-muted-foreground",
+};
+
+function LogList({ logs }: { logs: CoreLogEvent[] }) {
+  const t = useT();
+  if (!logs.length)
+    return <p className="py-6 text-center text-[13px] text-muted-foreground">{t("No events yet. Connect to populate this.")}</p>;
+  return (
+    <div className="flex max-h-[260px] flex-col gap-1 overflow-y-auto rounded-md bg-muted/50 p-3 font-mono text-[11.5px]">
+      {logs.slice(-200).map((entry, index) => (
+        <div key={`${entry.timestamp}-${index}`} className="grid grid-cols-[64px_78px_minmax(0,1fr)] gap-2.5">
+          <span className="tabular text-muted-foreground">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+          <span className={LEVEL[entry.level] ?? "text-muted-foreground"}>{entry.stream}</span>
+          <span className="break-words text-foreground/80">{entry.message}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------- routes
+
+/**
+ * What WhiteAesther is built on and under what terms.
+ *
+ * Aether is linked, so WhiteAesther is a derivative work and AGPL-3.0 obliges us
+ * to point at the source of the build someone is actually running. mihomo is
+ * conveyed as a separate executable under GPL-3.0, which obliges us to pass its
+ * licence on with it. Neither obligation is met by a licence file sitting in a
+ * repository nobody opens, so the text ships in the app and beside the binary.
+ */
+function Licences() {
+  const t = useT();
+  return (
+    <div className="space-y-3.5">
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("What this is built on")}</CardTitle>
+          <CardDescription>
+            Each component below keeps its own licence. WhiteAesther&apos;s own source is public, and
+            the full licence texts are installed next to the application under{" "}
+            <code className="font-mono text-[12px]">licences/</code>.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2.5">
+          <Row first title="WhiteAesther" help="This application. Source at github.com/WhiteDNS/WhiteAesther">
+            <span className="font-mono text-[12.5px] text-muted-foreground">AGPL-3.0</span>
+          </Row>
+          <Separator />
+          <Row title="Aether" help="The connection engine, shipped as a binary and run by this app. Aether 1.8.0">
+            <span className="font-mono text-[12.5px] text-muted-foreground">AGPL-3.0</span>
+          </Row>
+          <Separator />
+          <Row
+            title="mihomo"
+            help="The second hop behind Exit chain, run as a separate program. Source at github.com/MetaCubeX/mihomo at tag v1.19.30"
+          >
+            <span className="font-mono text-[12.5px] text-muted-foreground">GPL-3.0</span>
+          </Row>
+          <Separator />
+          <Row
+            title="Iran routing lists"
+            help="The addresses and domains behind “Iranian sites bypass the tunnel”, bundled as data. Source at github.com/Chocolate4U/Iran-clash-rules"
+          >
+            <span className="font-mono text-[12.5px] text-muted-foreground">GPL-3.0</span>
+          </Row>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("Full notices")}</CardTitle>
+          <CardDescription>
+            The same text that ships with the installer, including trademark terms and where each
+            component&apos;s corresponding source lives.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3.5 font-mono text-[11.5px] leading-relaxed text-muted-foreground">
+            {notices}
+          </pre>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/** The four things the core can actually be, rather than a transport toggle alone. */
+const PROTOCOLS: Array<{ id: string; label: string; detail: string; protocol: ConnectionProfile["protocol"]; transport?: "h2" | "h3" }> = [
+  { id: "h2", label: "MASQUE H2", detail: "TCP. Survives networks that block UDP.", protocol: "masque", transport: "h2" },
+  { id: "h3", label: "MASQUE H3", detail: "QUIC. Lower overhead where UDP gets through.", protocol: "masque", transport: "h3" },
+  { id: "wom", label: "WireGuard over MASQUE", detail: "WireGuard inside MASQUE. The outer hop can use H2 or H3.", protocol: "wom" },
+  { id: "wg", label: "WireGuard", detail: "UDP, with an obfuscation profile sweep.", protocol: "wg" },
+  // Two nested MASQUE hops. For a network that has learnt to recognise one --
+  // which is the case this whole app exists for, so it belongs in the picker
+  // rather than behind a flag. Desktop only: every protocol on Android needs an
+  // embedded variant that hands its stack to the app instead of binding
+  // listeners, and this one has none.
+  { id: "mim", label: "MASQUE in MASQUE", detail: "Two nested hops. Slower, for networks that spot a single one.", protocol: "mim" },
+  { id: "gool", label: "WARP in WARP", detail: "Nested tunnel. Slower, harder to classify.", protocol: "gool" },
+];
+
+/**
+ * The ways out of the network, and what each one costs.
+ *
+ * Tor is deliberately absent until it exists: an option that saves and does
+ * nothing is worse than one that is not offered.
+ */
+const CARRIERS: Array<{ id: CarrierKind; label: string; detail: string }> = [
+  {
+    id: "aether",
+    label: "Aether",
+    detail: "Cloudflare's network. Fast, and exits near you — it does not change your country.",
+  },
+  {
+    id: "psiphon",
+    label: "Psiphon",
+    detail: "Finds its own way out and can exit from another country. Slower to connect.",
+  },
+  {
+    id: "tor",
+    label: "Tor",
+    detail: "Three relays. The strongest against being identified, and the slowest. No UDP.",
+  },
+];
+
+const CARRIER_NAME: Record<CarrierKind, string> = {
+  aether: "Aether",
+  psiphon: "Psiphon",
+  tor: "Tor",
+};
+
+/**
+ * What each carrier means in the second position, where it decides the exit.
+ *
+ * Different text from the first position on purpose: the same carrier answers a
+ * different question there, and Aether in particular carries a condition that
+ * only applies when it is second.
+ */
+const AS_EXIT: Record<CarrierKind, string> = {
+  aether: "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.",
+  psiphon: "Can be pinned to a country below. Slower to connect.",
+  tor: "A Tor exit relay, in a country nobody here chooses. No UDP.",
+};
+
+/** Where the traffic comes out, given the hop that ends the chain. */
+const EXIT_NOTE: Record<CarrierKind, string> = {
+  aether: "Comes out on Cloudflare's network, close to you. This does not change your country.",
+  psiphon: "Comes out wherever Psiphon has capacity, and can be pinned to a country below.",
+  tor: "Comes out at a Tor exit relay.",
+};
+
+/**
+ * Whether a carrier passes datagrams.
+ *
+ * Measured rather than assumed — Psiphon answers a SOCKS5 UDP ASSOCIATE with
+ * "command not supported", which is why it reads false here despite having
+ * shipped as true once. A chain carries UDP only if every hop does.
+ */
+const CARRIES_UDP: Record<CarrierKind, boolean> = { aether: true, psiphon: false, tor: false };
+
+/** One choice in either hop picker. */
+function CarrierButton({
+  label,
+  detail,
+  on,
+  onClick,
+}: {
+  label: string;
+  detail: string;
+  on: boolean;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      onClick={onClick}
+      className={`rounded-lg border p-3 text-left transition ${
+        on ? "border-primary bg-primary/5" : "border-border hover:border-primary/40"
+      }`}
+    >
+      <div className="text-[13.5px] font-medium">{t(label)}</div>
+      <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">{t(detail)}</div>
+    </button>
+  );
+}
+
+/**
+ * Where Tor's bridges come from.
+ *
+ * The built-in list is Tor's own, shipped inside the expert bundle beside the
+ * binary it belongs to — so it can only go stale when the bundle does.
+ */
+const BRIDGE_MODES: Array<[ConnectionProfile["tor"]["bridges"], string]> = [
+  ["none", "Off"],
+  ["built-in", "Built-in"],
+  ["custom", "Pasted"],
+];
+
+const BRIDGE_TRANSPORTS: Array<[string, string]> = [
+  ["obfs4", "obfs4"],
+  ["snowflake", "snowflake"],
+  ["meek", "meek"],
+];
+
+/** Tor's bridges: off, Tor's own list, or lines the user was given. */
+function TorPanel({
+  profile,
+  onChange,
+}: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile["tor"]>) =>
+    onChange({ ...profile, tor: { ...profile.tor, ...patch } });
+
+  // Bridges reach Tor where Tor is blocked. As the second hop that question is
+  // already answered by the carrier in front, so the backend renders a torrc
+  // with no transports at all -- and controls that quietly do nothing are worse
+  // than controls that are not there.
+  if (profile.carriers.second === "tor") {
+    return (
+      <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+        {t("Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.")}
+      </p>
+    );
+  }
+
+  return (
+    <>
+      <Row
+        title="Bridges"
+        help="Only needed where Tor itself is blocked. Off is faster and works on an ordinary network."
+      >
+        <Seg value={profile.tor.bridges} options={BRIDGE_MODES} onChange={(bridges) => set({ bridges })} />
+      </Row>
+
+      {profile.tor.bridges === "built-in" ? (
+        <Row
+          title="Bridge transport"
+          help="Tor ships these bridges itself, so they are as current as this build. They are also public, which is what a censor blocks first."
+        >
+          <Seg
+            value={profile.tor.transport || "obfs4"}
+            options={BRIDGE_TRANSPORTS}
+            onChange={(transport) => set({ transport })}
+          />
+        </Row>
+      ) : null}
+
+      {profile.tor.bridges === "custom" ? (
+        <>
+          <RulesField
+            label="Bridge lines"
+            help="One per line, from bridges.torproject.org or someone who has one. A leading “Bridge” is fine — it is stripped."
+            value={profile.tor.customBridges}
+            onChange={(customBridges) => set({ customBridges })}
+            placeholder="obfs4 1.2.3.4:443 FINGERPRINT cert=… iat-mode=0"
+          />
+          <BridgeFetch
+            onFetched={(lines) =>
+              set({
+                // Appended rather than replacing: someone who was given a
+                // working line by a friend should not lose it to a button.
+                customBridges: [profile.tor.customBridges.trim(), lines.join("\n")]
+                  .filter(Boolean)
+                  .join("\n"),
+              })
+            }
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The one-tap fetch: ask Tor which bridges work in a country.
+ *
+ * The request goes out through whichever carrier is already up, because
+ * `bridges.torproject.org` is blocked in most of the places its answer is
+ * wanted. And it asks about the country the person is *in*, which is why there
+ * is a field rather than a guess — a desktop has no SIM to read one from, and
+ * inferring it from the current exit would ask about the one country the answer
+ * does not apply to.
+ */
+function BridgeFetch({ onFetched }: { onFetched: (lines: string[]) => void }) {
+  const t = useT();
+  const [country, setCountry] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const ask = async () => {
+    setFailure(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const lines = await fetchBridges(country);
+      onFetched(lines);
+      setNote(`${lines.length} ${lines.length === 1 ? "bridge added" : "bridges added"}`);
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Row
+        title="Ask Tor for bridges"
+        help="The country you are connecting from, not the one you want to appear in. Sent through your current connection, because this service is itself blocked in most places it is needed."
+      >
+        <div className="flex items-center gap-2">
+          <Input
+            value={country}
+            onChange={(event) => setCountry(event.target.value.toUpperCase().slice(0, 2))}
+            placeholder="IR"
+            className="h-9 w-16 text-center font-mono text-[13px]"
+            aria-label={t("Country you are connecting from")}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || country.trim().length !== 2}
+            onClick={() => void ask()}
+          >
+            {busy ? t("Asking…") : t("Fetch")}
+          </Button>
+        </div>
+      </Row>
+      {note ? <p className="pb-1 text-[12.5px] text-muted-foreground">{note}</p> : null}
+      {failure ? <p className="pb-1 text-[12.5px] text-destructive">{failure}</p> : null}
+    </>
+  );
+}
+
+/**
+ * Choosing the way out, and where it comes out.
+ *
+ * The country list is Psiphon's own answer rather than a table of ours, so it
+ * is empty until the first successful connect — the field says "best available"
+ * until then instead of offering countries it cannot promise.
+ */
+/**
+ * The one action for someone who does not know which way out works.
+ *
+ * Its own card, and a filled button. As a `secondary` button tucked under the
+ * pickers it read as a caption beside them and was missed entirely -- which for
+ * the single control aimed at the person with no idea what to choose is the
+ * whole feature failing quietly.
+ */
+/**
+ * Waits for one attempt to reach an answer, and says what the answer was.
+ *
+ * `null` means it is carrying traffic; a string is the reason it is not.
+ *
+ * Asked of the supervisor rather than inferred from `start_core` returning.
+ * That call answers at two different moments — after a hop is carrying traffic
+ * on the chained path, and the instant the process is spawned on the engine
+ * path — so treating it as the verdict settled the whole sweep on Aether alone
+ * wherever the engine binary merely existed, and the chained orderings below it
+ * were never tried at all.
+ *
+ * The cap is a safety net and not the deadline: each carrier fails its own
+ * attempt at its own deadline and says why, which is the answer worth showing.
+ * It is enforced by stopping rather than by walking away — the supervisor
+ * checks between hops and unwinds, so a timed-out attempt leaves nothing
+ * running.
+ */
+async function settle(
+  cap: number,
+  deadline: number,
+  cancelled: () => boolean,
+  t: (key: string) => string,
+): Promise<string | null> {
+  // Remembered so the timeout can say which half of the wait ran out. "Did not
+  // connect" and "connected and then carried nothing" send someone to look in
+  // completely different places.
+  let everConnected = false;
+  // Why the last probe said no, so a route that came up and never proved itself
+  // is reported as that rather than as a bare timeout. "Connected but nothing
+  // got through" and "connected, and something that was not cloudflare-dns.com
+  // answered for it" send someone to very different places.
+  let lastRefusal: string | null = null;
+  while (!cancelled()) {
+    // A status call that fails says nothing about the attempt — the window is
+    // closing, or the backend is busy — so it waits rather than convicting.
+    const snapshot = await getCoreStatus().catch(() => null);
+    if (snapshot) {
+      const verdict = verdictFor(snapshot.state);
+      if (verdict === "connected") {
+        everConnected = true;
+        // The last question, and the only one asked of the route rather than of
+        // the processes making it: did a host prove who it was through it? A
+        // carrier that finishes its handshake and then carries nothing is the
+        // worst thing a search can settle on — it looks like success on every
+        // screen and fails everything the person tries next.
+        //
+        // Not "did bytes come back": an interception answers that too, and on a
+        // network that intercepts, the search would confidently pick the one
+        // route that is being read. `probeCarrier` asks a name the carrier has
+        // to resolve and checks the certificate that comes back is for it.
+        //
+        // A reason is not yet a verdict. A route asked in its first moment is
+        // often still settling, so it goes round again until the cap, and only
+        // the cap turns the last reason into a failure.
+        lastRefusal = await probeCarrier().catch(() => "the probe could not run");
+        if (lastRefusal === null) return null;
+      } else if (verdict === "failed") {
+        // The backend's own words when it has them. Those arrive in English
+        // from the supervisor, as every other failure on this list does.
+        return snapshot.lastError ?? t("stopped without saying why");
+      }
+    }
+    if (Date.now() >= deadline) {
+      // The seconds go in brackets at the end rather than inside the sentence:
+      // there is no interpolation in the dictionary, and a number spliced into
+      // the middle of a Persian sentence would have to be a different sentence.
+      const spent = ` (${Math.round(cap / 1000)}s)`;
+      if (!everConnected) return t("did not connect within its own deadline") + spent;
+      return lastRefusal
+        ? `${t("connected, but nothing proved who it was through it")} — ${lastRefusal}${spent}`
+        : t("connected, but nothing proved who it was through it") + spent;
+    }
+    await new Promise((resume) => window.setTimeout(resume, SETTLE_POLL_MS));
+  }
+  return t("the search was stopped");
+}
+
+/** `m:ss`, for a wait measured in minutes rather than hours. */
+function formatDuration(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function WayOutSearch({
+  profile,
+  onChange,
+  available,
+}: Pick<AdvancedProps, "profile" | "onChange"> & { available: CarrierKind[] | null }) {
+  const t = useT();
+  const [attempts, setAttempts] = useState<SearchAttempt[]>([]);
+  const [searching, setSearching] = useState(false);
+  // Its own state rather than the exit country's `failure`: sharing one would
+  // let a stale region error read as a search result, and the region error is
+  // only rendered where Psiphon is in the chain, so a search that found
+  // nothing would have had nowhere to say so.
+  const [searchFailure, setSearchFailure] = useState<string | null>(null);
+  // Read by the loop between attempts, so Stop takes effect on the next one
+  // rather than after all nine. Held in a ref because the running loop closes
+  // over its own render's state and would never see a change to it.
+  const cancelled = useRef(false);
+  // A clock, because the waits are now as long as the carriers themselves need
+  // and minutes of silence is what people give up on. A screen that is visibly
+  // counting is a screen that is visibly working.
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === null) return;
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, [startedAt]);
+
+  const order = useMemo(() => searchOrder(available), [available]);
+
+  /**
+   * Tries each way out in turn and keeps the first that carries traffic.
+   *
+   * Drives the same `start_core` the Connect button does rather than
+   * orchestrating hops itself. Two orchestrators would be two copies of the
+   * startup order, and a second copy of a rule is what put seven faults in the
+   * chain path at once.
+   */
+  const search = async () => {
+    setSearching(true);
+    setSearchFailure(null);
+    cancelled.current = false;
+    setStartedAt(Date.now());
+    setNow(Date.now());
+    setAttempts(order.map((candidate) => ({ chain: candidate, outcome: "pending" })));
+
+    // Whatever is up now is in the way: the supervisor refuses a second
+    // connection while one is claimed.
+    await stopCore().catch(() => {});
+
+    // The single carriers run together rather than in turn, because trying them
+    // in turn means the wait is the sum of the ones that failed first. On a
+    // network where the engine cannot get out but Psiphon can, that was minutes
+    // of the engine's budget before Psiphon was even started.
+    //
+    // The pairs below stay sequential and that is not a shortcut: every pair
+    // uses two of the three carriers, so no two of them can run at once.
+    const singles = order.filter((chain) => chain.second === null);
+    const pairs = order.filter((chain) => chain.second !== null);
+    let settled = false;
+
+    if (singles.length > 0 && !cancelled.current) {
+      setAttempts((current) =>
+        current.map((entry) => (entry.chain.second === null ? { ...entry, outcome: "trying" } : entry)),
+      );
+      const report = await raceCarriers(profile).catch((error) => {
+        setSearchFailure(error instanceof Error ? error.message : String(error));
+        return null;
+      });
+      const winner = report?.winner ?? null;
+
+      // What each way out actually did, in its own words. A lane that was still
+      // running when another answered first is not one that was ruled out, and
+      // the list says which is which.
+      if (report) {
+        const said = new Map(report.lanes.map((lane) => [lane.carrier, lane]));
+        setAttempts((current) =>
+          current.map((entry) => {
+            if (entry.chain.second !== null) return entry;
+            const lane = said.get(entry.chain.first);
+            if (!lane) {
+              return { ...entry, outcome: "pending", detail: t("still running when another answered") };
+            }
+            return {
+              ...entry,
+              outcome: lane.outcome === "carried" ? "connected" : "failed",
+              detail: lane.detail ?? undefined,
+            };
+          }),
+        );
+      }
+
+      if (!cancelled.current && winner) {
+        // The race proved the carrier and, for the engine, which framing did
+        // it. Both have to reach the profile, or the search proves one thing
+        // and the session that follows runs another.
+        const chosen = profileForWinner(profile, winner);
+        // Started on the ordinary path, not adopted from the race. The race
+        // stops everything it started, the winner included — so what is running
+        // afterwards is a session the connect path built, with a snapshot, a
+        // routing engine and a system proxy behind it.
+        await startCore(chosen).catch(() => {});
+        // The endpoint setting stays the user's own on screen: a pin without a
+        // fallback is given one for this session only.
+        onChange({ ...chosen, endpointMode: profile.endpointMode });
+        settled = true;
+      }
+    }
+
+    for (const [position, candidate] of pairs.entries()) {
+      if (settled || cancelled.current) break;
+      // The attempts list is built from `order`, where the pairs sit after the
+      // singles, so a pair's place in it is not its place in `pairs`.
+      const index = singles.length + position;
+      setAttempts((current) =>
+        current.map((entry, at) => (at === index ? { ...entry, outcome: "trying" } : entry)),
+      );
+
+      // One deadline for the whole attempt, armed before it starts. The two
+      // paths spend it in different places -- a chained `start_core` blocks
+      // inside the call while the engine path returns at once and does its
+      // waiting in `settle` -- so anchoring both to the same moment is what
+      // keeps an attempt from being given the budget twice.
+      const cap = attemptCapMs(candidate, profile);
+      const deadline = Date.now() + cap;
+      const net = window.setTimeout(() => void stopCore().catch(() => {}), cap);
+      let failure: string | null = null;
+      try {
+        await startCore({ ...profile, carriers: candidate });
+        // And then wait for it to actually carry traffic. `start_core` answers
+        // at two different moments: on the chained path it has already waited
+        // for a hop to carry traffic, and on the engine path it returns the
+        // instant the process is spawned. Only the snapshot tells them apart.
+        failure = await settle(cap, deadline, () => cancelled.current, t);
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      } finally {
+        window.clearTimeout(net);
+      }
+
+      // Stopped part-way through this attempt. It has no verdict, so it keeps
+      // none: marking it failed would put a carrier on the list as ruled out
+      // here when all that happened is that nobody waited for it.
+      if (cancelled.current) break;
+
+      if (!failure) {
+        setAttempts((current) =>
+          current.map((entry, at) => (at === index ? { ...entry, outcome: "connected" } : entry)),
+        );
+        // Say what it settled on, and leave the profile holding it. Ending on
+        // one ordering while the screen still shows another is the whole
+        // failure this feature could introduce.
+        onChange({ ...profile, carriers: candidate });
+        settled = true;
+        break;
+      }
+
+      setAttempts((current) =>
+        current.map((entry, at) =>
+          at === index
+            ? { ...entry, outcome: isImpossible(failure) ? "skipped" : "failed", detail: failure }
+            : entry,
+        ),
+      );
+      await stopCore().catch(() => {});
+    }
+
+    if (!settled && !cancelled.current) {
+      setSearchFailure(
+        t("Nothing got out. Every way out was tried; the list above says how each one failed."),
+      );
+    }
+    setSearching(false);
+    setStartedAt(null);
+  };
+
+  const elapsed = startedAt === null ? 0 : Math.max(0, Math.round((now - startedAt) / 1000));
+  const budgetMinutes = Math.ceil(searchBudgetMs(order, profile) / 60_000);
+  return (
+    <Card className="border-primary/40 bg-primary/[0.06]">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-[15px]">{t("Not sure which one works?")}</CardTitle>
+        <CardDescription>
+          {t("Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 pt-0">
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant={searching ? "outline" : "default"}
+            onClick={() => {
+              if (searching) {
+                cancelled.current = true;
+                void stopCore().catch(() => {});
+                return;
+              }
+              void search();
+            }}
+          >
+            {searching ? t("Stop searching") : t("Find one that works")}
+          </Button>
+          {/* The real number, before anyone commits to waiting for it. Each
+              carrier is given the time it actually needs to answer, which is
+              what makes the worst case long — and someone who was told that
+              waits, where someone who was not stops at two minutes believing
+              the app has hung. */}
+          {searching ? (
+            <p className="text-[12.5px] leading-snug text-muted-foreground">
+              {t("Searching")} · {formatDuration(elapsed)} ·{" "}
+              {t("each carrier is given the time it needs. Stopping takes effect after the current attempt.")}
+            </p>
+          ) : (
+            <p className="text-[12.5px] leading-snug text-muted-foreground">
+              {t("Worst case")} {budgetMinutes}{" "}
+              {t("minutes, if nothing gets out at all — and seconds when the first one does.")}
+            </p>
+          )}
+        </div>
+
+        {searchFailure ? (
+          <p className="text-[12.5px] leading-snug text-destructive">{searchFailure}</p>
+        ) : null}
+
+        {attempts.length > 0 ? (
+          <ul className="flex flex-col gap-1">
+            {attempts.map((entry) => {
+              const name = carrierChainLabel(entry.chain, (kind) => t(CARRIER_NAME[kind]));
+              const mark = {
+                pending: "·",
+                trying: "…",
+                connected: "✓",
+                failed: "✕",
+                skipped: "–",
+              }[entry.outcome];
+              const tone = {
+                pending: "text-muted-foreground/60",
+                trying: "text-foreground",
+                connected: "text-primary font-medium",
+                failed: "text-muted-foreground",
+                skipped: "text-muted-foreground/70",
+              }[entry.outcome];
+              return (
+                <li key={name} className={`text-[12.5px] leading-snug ${tone}`}>
+                  <span className="inline-block w-4">{mark}</span>
+                  {name}
+                  {entry.outcome === "connected" ? ` — ${t("carrying traffic")}` : null}
+                  {/* The backend's own words. A search that says "failed" and
+                      nothing else is a search nobody can act on. */}
+                  {entry.detail && entry.outcome !== "connected" ? (
+                    <span className="text-muted-foreground/70"> — {entry.detail}</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CarrierPanel({
+  profile,
+  onChange,
+}: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const [regions, setRegions] = useState<string[]>([]);
+  const [moving, setMoving] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  // Everything until the backend answers. A picker that starts empty and fills
+  // in would flicker; one that starts full and removes a carrier is worse,
+  // because someone may have clicked it already.
+  const [available, setAvailable] = useState<CarrierKind[] | null>(null);
+
+  const chain = profile.carriers;
+  const offered = CARRIERS.filter((option) => !available || available.includes(option.id));
+  // Weakest link: a chain passes datagrams only if every hop does.
+  const carriesUdp = CARRIES_UDP[chain.first] && (chain.second === null || CARRIES_UDP[chain.second]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let cancelled = false;
+    carriersAvailable()
+      .then((list) => {
+        if (!cancelled) setAvailable(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!carrierChainHas(profile.carriers, "psiphon") || !isDesktopRuntime()) return;
+    let cancelled = false;
+    const read = () =>
+      psiphonStatus()
+        .then((status) => {
+          if (!cancelled) setRegions(status.availableRegions);
+        })
+        .catch(() => {});
+    read();
+    // Psiphon reports its countries after a handshake, so the list arrives some
+    // time after the screen does. Polling rather than waiting for an event
+    // because it changes at most once per session.
+    const timer = window.setInterval(read, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [profile.carriers.first, profile.carriers.second]);
+
+  const chooseRegion = async (region: string) => {
+    set({ psiphon: { ...profile.psiphon, egressRegion: region } });
+    if (!isDesktopRuntime()) return;
+    setFailure(null);
+    setMoving(true);
+    try {
+      // Applies to a live session; a no-op when nothing is connected, in which
+      // case the choice above still stands for the next connect.
+      await setPsiphonRegion(region);
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setMoving(false);
+    }
+  };
+
+  return (
+    <>
+      <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-[15px]">{t("Way out")}</CardTitle>
+        <CardDescription>
+          {t("What carries your traffic off this network. Add a second hop to change where it comes out.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pt-0">
+        {/* On by default, and the first thing on this card, because it decides
+            what every other control here means. Someone who reaches down and
+            picks a carrier has chosen one, and choosing turns this off — which
+            is the only reading of "I picked Tor" that is not a lie. */}
+        <Row
+          title="Find the way out for me"
+          help="Connect tries every way out at once and keeps the first that carries traffic. Off, it uses the one chosen below."
+        >
+          <Switch
+            checked={profile.autoRoute}
+            onCheckedChange={(autoRoute) => set({ autoRoute })}
+          />
+        </Row>
+        <Separator className="mb-3" />
+
+        <p className="pb-2 text-[12.5px] font-medium">
+          {profile.autoRoute ? t("Used when the search finds nothing") : t("Leaves this network through")}
+        </p>
+        <div className="grid grid-cols-2 gap-2.5">
+          {offered.map((option) => (
+            <CarrierButton
+              key={option.id}
+              label={option.label}
+              detail={option.detail}
+              on={chain.first === option.id}
+              // Keep the second hop across a change of the first unless that
+              // would chain a carrier to itself, which reaches the same
+              // network through itself for twice the delay.
+              onClick={() =>
+                set({
+                  carriers: { first: option.id, second: chain.second === option.id ? null : chain.second },
+                })
+              }
+            />
+          ))}
+        </div>
+
+        <p className="pb-2 pt-4 text-[12.5px] font-medium">{t("Then out through")}</p>
+        <div className="grid grid-cols-2 gap-2.5">
+          <CarrierButton
+            label="Nothing further"
+            detail="One hop. Traffic comes out wherever the carrier above puts it."
+            on={chain.second === null}
+            onClick={() => set({ carriers: { first: chain.first, second: null } })}
+          />
+          {offered
+            .filter((option) => option.id !== chain.first)
+            .map((option) => (
+              <CarrierButton
+                key={option.id}
+                label={option.label}
+                detail={AS_EXIT[option.id]}
+                on={chain.second === option.id}
+                onClick={() => set({ carriers: { first: chain.first, second: option.id } })}
+              />
+            ))}
+        </div>
+
+        {/* The chain said back, in the order traffic travels, with what this
+            particular ordering does and does not get you. Two orderings look
+            alike in the pickers and differ entirely here. */}
+        <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">
+          <div className="text-[13.5px] font-medium">
+            {carrierChainLabel(chain, (kind) => t(CARRIER_NAME[kind]))}
+          </div>
+          <div className="mt-1 text-[12.5px] leading-snug text-muted-foreground">
+            {t(EXIT_NOTE[carrierChainLast(chain)])}
+          </div>
+          {chain.second === "aether" ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-amber-600 dark:text-amber-500">
+              {t("Aether cannot register a new device through another carrier, so this ordering only works if Aether has connected on this machine before. It also comes out near you rather than abroad.")}
+            </div>
+          ) : null}
+          {chain.second && !carriesUdp ? (
+            <div className="mt-1.5 text-[12.5px] leading-snug text-muted-foreground">
+              {t("No UDP through this chain: QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.")}
+            </div>
+          ) : null}
+        </div>
+
+        {carrierChainHas(profile.carriers, "psiphon") ? (
+          <>
+            <Row title="Exit country" help="A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.">
+              <select
+                value={profile.psiphon.egressRegion}
+                disabled={moving}
+                onChange={(event) => void chooseRegion(event.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-2 text-[13px]"
+              >
+                <option value="">{t("Best available")}</option>
+                {regions.map((region) => (
+                  <option key={region} value={region}>
+                    {region}
+                  </option>
+                ))}
+              </select>
+            </Row>
+            {moving ? (
+              <p className="pb-1 text-[12.5px] text-muted-foreground">
+                {t("Moving the exit. This reconnects, so it takes as long as connecting does.")}
+              </p>
+            ) : null}
+            {failure ? <p className="pb-1 text-[12.5px] text-destructive">{failure}</p> : null}
+            {regions.length === 0 ? (
+              <p className="pb-1 text-[12.5px] text-muted-foreground">
+                {t("The country list is Psiphon's own and arrives once you have connected at least once.")}
+              </p>
+            ) : null}
+            {/* The brief's rule, made visible rather than left to be discovered:
+                the scanner, the pinned endpoint and the discovery depth all
+                describe a hunt for a Cloudflare gateway, and none of them do
+                anything here. */}
+            <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.")}
+            </p>
+            {/* Said before it happens rather than left to be met as a hang. A
+                fresh Psiphon data directory has no tactics, so the path that
+                matters on a filtered network — in-proxy, which is brokered over
+                WebRTC before any tunnel exists — is not available yet, and
+                reaching it can take tunnel-core's full establish window. That
+                is minutes of a screen doing nothing visible, and minutes of
+                silence is what people stop. */}
+            <p className="pt-1 text-[12.5px] leading-snug text-muted-foreground">
+              {t("The first connect on a hard network can take several minutes: Psiphon has to fetch its own settings before it can use the routes that work there. Later connects are much faster.")}
+            </p>
+          </>
+        ) : null}
+
+        {carrierChainHas(profile.carriers, "tor") ? (
+          <>
+            <TorPanel profile={profile} onChange={onChange} />
+            {/* Said plainly rather than left to be met as a fault. Tor carries
+                no datagrams, so the chain refuses them rather than swallowing
+                them — which is what makes a resolver fall back to TCP within a
+                round trip instead of hanging. */}
+            <p className="pt-2 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Tor carries no UDP, so QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.")}
+            </p>
+            <p className="pt-1 text-[12.5px] leading-snug text-muted-foreground">
+              {t("Under Tor the endpoint scanner, the pinned endpoint and the transport choice do nothing — Tor picks its own relays.")}
+            </p>
+          </>
+        ) : null}
+      </CardContent>
+      </Card>
+
+      <WayOutSearch profile={profile} onChange={onChange} available={available} />
+    </>
+  );
+}
+
+function Routes({ profile, onChange }: AdvancedProps) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  // MASQUE is the only protocol with a second axis, so it is the only one whose
+  // id is not simply the protocol. A chain of ternaries that ended in "gool"
+  // silently claimed every unknown protocol was WARP-in-WARP, which is how a
+  // new one shows up in the picker with the wrong button lit.
+  const active =
+    profile.protocol === "masque" ? profile.masqueTransport : profile.protocol;
+  const isMasque = profile.protocol === "masque";
+  const isH2 = ["masque", "mim", "wom"].includes(profile.protocol) && profile.masqueTransport === "h2";
+
+  // Everything below the carrier picker describes the Aether engine: which
+  // transport it rides, how hard it searches for a Cloudflare gateway, how it
+  // obfuscates. Under Psiphon or Tor none of it is read.
+  //
+  // 1.8.0 left these live and merely added a sentence saying they did nothing,
+  // and the first question asked of that screen was "which of these protocols
+  // work with Psiphon?" — with MASQUE H2 still highlighted as though it were
+  // the answer. A control that saves and does nothing is worse than one that is
+  // absent, so they are absent.
+  const aetherOnly = isLoneAether(profile.carriers);
+
+  return (
+    <>
+      <CarrierPanel profile={profile} onChange={onChange} />
+      {!aetherOnly ? (
+        <Card>
+          <CardContent className="py-4">
+            <p className="text-[13px] leading-snug text-muted-foreground">
+              {t("The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.")}
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
+      {aetherOnly ? (
+      <><Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-[15px]">{t("Protocol")}</CardTitle>
+          <CardDescription>{t("Retries alternate the two MASQUE transports automatically.")}</CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-2 gap-2.5 pt-0">
+          {PROTOCOLS.map((option) => {
+            const on = active === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={on}
+                onClick={() =>
+                  set({ protocol: option.protocol, ...(option.transport ? { masqueTransport: option.transport } : {}) })
+                }
+                className={[
+                  "flex flex-col gap-1 rounded-lg border p-3 text-start transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  on ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:bg-accent",
+                ].join(" ")}
+              >
+                {/* The label is a protocol name and stays as it is; only the
+                    sentence under it is ours to translate. */}
+                <span className="text-[13.5px] font-semibold">{option.label}</span>
+                <span className="text-xs leading-snug text-muted-foreground">{t(option.detail)}</span>
+              </button>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      {profile.protocol === "wom" || profile.protocol === "mim" ? <Card><CardContent className="pt-4"><Row first title="Outer MASQUE framing"><Seg value={profile.masqueTransport} onChange={(masqueTransport) => set({ masqueTransport })} options={[["h2", "H2"], ["h3", "H3"]]} /></Row></CardContent></Card> : null}
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Search")}</CardTitle></CardHeader>
+        <CardContent className="pt-0">
+          <Row first title="Search depth" help="Deeper searches take longer but survive stricter filtering.">
+            <Seg
+              value={profile.scanMode}
+              onChange={(scanMode) => set({ scanMode })}
+              options={[["turbo", "turbo"], ["balanced", "balanced"], ["thorough", "thorough"], ["stealth", "stealth"], ["verified", "Verified edges"], ["ironclad", "ironclad"]]}
+            />
+          </Row>
+          {profile.scanMode === "verified" ? <p className="pb-3 text-[13px] text-muted-foreground">{t("Prioritises known gateways and verifies the current path. Historical results do not guarantee reachability.")}</p> : null}
+          <Row title="Addresses" help="Turn off IPv6 where the network handles it badly.">
+            <Seg
+              value={profile.ipFamily}
+              onChange={(ipFamily) => set({ ipFamily })}
+              options={[["both", "both"], ["v4", "IPv4"], ["v6", "IPv6"]]}
+            />
+          </Row>
+          <Row title="Reuse the last working edge" help="Verify the cached gateway before scanning fresh.">
+            <Switch checked={profile.quickReconnect} onCheckedChange={(quickReconnect) => set({ quickReconnect })} />
+          </Row>
+          <Row title="End-to-end data check" help="Expose the proxy only after a real tunnelled request succeeds.">
+            <Switch checked={profile.dataCheck} onCheckedChange={(dataCheck) => set({ dataCheck })} />
+          </Row>
+          <Row title="Resource profile" help="How much concurrency the core gives the scan.">
+            <Seg
+              value={profile.performanceProfile}
+              onChange={(performanceProfile) => set({ performanceProfile })}
+              options={[["auto", "auto"], ["low", "low"], ["medium", "medium"], ["high", "high"]]}
+            />
+          </Row>
+          <Separator />
+          <div className="grid grid-cols-3 gap-4 pt-4">
+            <NumberField
+              label="Validation deadline" unit="sec" min={1} max={120}
+              value={profile.validateSecs} onChange={(validateSecs) => set({ validateSecs })}
+            />
+            <NumberField
+              label="Startup deadline" unit="sec" min={5} max={300}
+              value={profile.startupSecs} onChange={(startupSecs) => set({ startupSecs })}
+            />
+            <NumberField
+              label="Reconnect delay" unit="sec" min={0} max={120}
+              value={profile.reconnectSecs} onChange={(reconnectSecs) => set({ reconnectSecs })}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-1">
+          <CardTitle className="text-[15px]">{t("Anti-blocking")}</CardTitle>
+          <CardDescription>
+            {isMasque
+              ? t("Both cost a little on a healthy network and only matter on a filtered one.")
+              : t("Obfuscation applies to WireGuard. Manual TLS and ECH settings also affect WARP registration.")}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <Row
+            first
+            title="Split the TLS opening"
+            help={isH2 ? t("Defeats filtering that reads only the first packet.") : t("Applies to MASQUE H2, including the outer H2 hop of nested transports.")}
+          >
+            <Switch
+              disabled={!isH2}
+              checked={profile.fragmentClientHello}
+              onCheckedChange={(fragmentClientHello) => set({ fragmentClientHello })}
+            />
+          </Row>
+          {isH2 && profile.fragmentClientHello ? (
+            <>
+              <Row title="ClientHello shape" help="Automatic recovery also tries these TLS record layouts.">
+                <Seg value={profile.helloShape} onChange={(helloShape) => set({ helloShape })}
+                  options={[["", "TCP fragments"], ["records", "TLS records"], ["compact", "Compact records"]]} />
+              </Row>
+              <Row title="Split inside the server name" help="Keeps the SNI boundary inside separate writes.">
+                <Switch checked={profile.fragmentSni} onCheckedChange={(fragmentSni) => set({ fragmentSni })} />
+              </Row>
+              <Separator />
+              <div className="grid grid-cols-2 gap-4 py-4">
+                <TextField
+                  label="Fragment size" mono value={profile.fragmentSize}
+                  onChange={(fragmentSize) => set({ fragmentSize })}
+                  help="Bytes per write, or a range like 16-32."
+                />
+                <TextField
+                  label="Fragment delay" mono value={profile.fragmentDelay}
+                  onChange={(fragmentDelay) => set({ fragmentDelay })}
+                  help="Milliseconds between writes, or a range."
+                />
+              </div>
+            </>
+          ) : null}
+          <Row title="Obfuscation profile" help="Padding that makes tunnel traffic harder to fingerprint.">
+            <Seg
+              value={profile.noize}
+              onChange={(noize) => set({ noize })}
+              options={[["off", "off"], ["light", "light"], ["firewall", "firewall"], ["balanced", "balanced"], ["gfw", "gfw"], ["aggressive", "aggressive"]]}
+            />
+          </Row>
+          <Row title="Try other obfuscation profiles" help="On WireGuard, fall back through the other profiles when one finds nothing.">
+            <Switch checked={profile.profileRetry} onCheckedChange={(profileRetry) => set({ profileRetry })} />
+          </Row>
+          <Row title="WireGuard keepalive" help="How often to hold the UDP mapping open. Zero leaves it to the engine.">
+            <div className="w-[132px]">
+              <NumberField
+                unit="sec" min={0} max={300}
+                value={profile.keepaliveSecs} onChange={(keepaliveSecs) => set({ keepaliveSecs })}
+              />
+            </div>
+          </Row>
+          <Row
+            title="Match domain rules on sniffed names"
+            help="Reads the host name from the first bytes of a connection, so rules written as domains still match when a program connects to a bare address. Off, those rules only match when a name was supplied."
+          >
+            <Switch checked={profile.routeSniff} onCheckedChange={(routeSniff) => set({ routeSniff })} />
+          </Row>
+          <Row
+            title="Register again if the identity is refused"
+            help="Cloudflare sometimes stops accepting a saved device, and the handshake then succeeds while nothing passes. Off, the refusal is reported and the identity kept — which is what you want while diagnosing an account, and not otherwise."
+          >
+            <Switch
+              checked={profile.autoReprovision}
+              onCheckedChange={(autoReprovision) => set({ autoReprovision })}
+            />
+          </Row>
+
+        </CardContent>
+      </Card></>
+      ) : null}
+      {profile.autoRoute || carrierChainHas(profile.carriers, "aether") ? <AetherTlsSettings profile={profile} onChange={onChange} /> : null}
+    </>
+  );
+}
+
+function AetherTlsSettings({ profile, onChange }: Pick<AdvancedProps, "profile" | "onChange">) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  return <Card><CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("TLS and ECH")}</CardTitle><CardDescription>{t("Applies to Aether handshakes and registration, including Aether hops in a carrier chain.")}</CardDescription></CardHeader><CardContent>
+          <div className="grid grid-cols-2 gap-4 pt-4">
+            <TextField
+              label="Encrypted Client Hello" mono value={profile.ech ?? ""}
+              placeholder="off, auto, or base64"
+              onChange={(value) => set({ ech: value || null })}
+              help="Hides the name on H2/H3 and WARP registration. A requested ECH attempt fails if no usable key is offered or accepted."
+            />
+            <TextField
+              label="TLS groups" mono value={profile.tlsGroups ?? ""}
+              placeholder="X25519:P-256:P-384"
+              onChange={(value) => set({ tlsGroups: value || null })}
+              help="Key exchange groups in order, separated by ':'. Empty uses the core default."
+            />
+            <TextField label="TLS 1.2 cipher suites" mono value={profile.tlsCiphers ?? ""}
+              placeholder="ECDHE-RSA-AES128-GCM-SHA256"
+              onChange={(value) => set({ tlsCiphers: value || null })}
+              help="BoringSSL names separated by ':'. Empty uses the core default. Does not select TLS 1.3 cipher suites." />
+            <TextField label="WARP registration address" mono value={profile.enrollAddress ?? ""}
+              placeholder="host:443"
+              onChange={(value) => set({ enrollAddress: value || null })}
+              help="Optional host/IP with a port; default 443. Changes registration's network destination while preserving its Host, SNI and certificate checks." />
+            <TextField label="ECH resolver" mono value={profile.echResolver ?? ""}
+              placeholder="https://1.1.1.1/dns-query"
+              onChange={(value) => set({ echResolver: value || null })}
+              help="udp://IP, tcp://IP or https:// DoH. Empty uses protected DoH through the upstream carrier. Saved while ECH is off, used only when on." />
+            <TextField label="ECH key domain" mono value={profile.echDomain ?? ""}
+              placeholder="cloudflare-ech.com"
+              onChange={(value) => set({ echDomain: value || null })}
+              help="Domain with the HTTPS record containing the ECH key. Empty uses cloudflare-ech.com." />
+            <TextField
+              label="Dial through a local proxy" mono value={profile.upstreamProxy}
+              placeholder="socks5://host:port"
+              onChange={(upstreamProxy) => set({ upstreamProxy })}
+              help="The endpoint search goes through it too, so it never reveals the address the tunnel hides."
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-4 pt-4 sm:grid-cols-2">
+            <TextField label="MASQUE server name" mono value={profile.masqueSni ?? ""} onChange={(value) => set({ masqueSni: value || null })} help="Empty uses the core default." />
+            <TextField label="WARP API host" mono value={profile.apiHost ?? ""} onChange={(value) => set({ apiHost: value || null })} help="Empty uses the core default." />
+            <TextField label="WARP API server name" mono value={profile.apiSni ?? ""} onChange={(value) => set({ apiSni: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS 1.3 cipher suites" mono value={profile.tls13Ciphers ?? ""} onChange={(value) => set({ tls13Ciphers: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS key shares" mono value={profile.tlsKeyShares ?? ""} onChange={(value) => set({ tlsKeyShares: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS signature algorithms" mono value={profile.tlsSigalgs ?? ""} onChange={(value) => set({ tlsSigalgs: value || null })} help="Empty uses the core default." />
+            <TextField label="Certificate compression" mono value={profile.tlsCertCompression ?? ""} onChange={(value) => set({ tlsCertCompression: value || null })} help="Empty uses the core default." />
+            <TextField label="ALPS codepoint" mono value={profile.tlsAlps ?? ""} onChange={(value) => set({ tlsAlps: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS trust anchor IDs" mono value={profile.tlsTrustAnchors ?? ""} onChange={(value) => set({ tlsTrustAnchors: value || null })} help="Empty uses the core default." />
+            <TextField label="TLS server padding" mono value={profile.tlsServerPadding ?? ""} onChange={(value) => set({ tlsServerPadding: value || null })} help="Empty uses the core default." />
+          </div>
+          <Row title="Disable GREASE" help="Off by default: GREASE remains enabled. Does not disable encryption or certificate verification."><Switch checked={profile.disableGrease} onCheckedChange={(disableGrease) => set({ disableGrease })} /></Row>
+          <Row title="Enable GREASE signature algorithms" help="Changes the TLS handshake fingerprint."><Switch checked={profile.enableGreaseSigalgs} onCheckedChange={(enableGreaseSigalgs) => set({ enableGreaseSigalgs })} /></Row>
+          <Row title="Enable ECH GREASE" help="Changes the TLS handshake fingerprint."><Switch checked={profile.enableEchGrease} onCheckedChange={(enableEchGrease) => set({ enableEchGrease })} /></Row>
+          <Row title="Disable OCSP stapling request" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableOcspStapling} onCheckedChange={(disableOcspStapling) => set({ disableOcspStapling })} /></Row>
+          <Row title="Disable signed certificate timestamps request" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableSct} onCheckedChange={(disableSct) => set({ disableSct })} /></Row>
+          <Row title="Disable session tickets" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableSessionTicket} onCheckedChange={(disableSessionTicket) => set({ disableSessionTicket })} /></Row>
+          <Row title="Disable TLS extension permutation" help="Changes the TLS handshake fingerprint."><Switch checked={profile.disableExtensionPermutation} onCheckedChange={(disableExtensionPermutation) => set({ disableExtensionPermutation })} /></Row>
+  </CardContent></Card>;
+}
+
+// -------------------------------------------------------------------- endpoint
+
+function Endpoint({ profile, onChange, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const error = endpointError(profile.endpointMode, profile.peer ?? "");
+  const canonical = normalizeEndpoint(profile.peer ?? "");
+  return (
+    <>
+      <Scanner
+        profile={profile}
+        snapshot={snapshot}
+        onToast={onToast}
+        // Picking a candidate is only useful if it is actually used, so the mode
+        // moves off Automatic at the same time.
+        onPick={(candidate) =>
+          set({ ...candidate.recipe, peer: candidate.peer, endpointMode: "custom-first" })
+        }
+      />
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Pinned endpoint")}</CardTitle></CardHeader>
+        <CardContent className="pt-0">
+          <Row first title="How the gateway is chosen" help="Custom first spends one attempt on your address before searching. Custom only never searches.">
+            <Seg
+              value={profile.endpointMode}
+              onChange={(endpointMode) => set({ endpointMode })}
+              options={ENDPOINT_MODES.map((mode) => [mode.id, mode.label] as [typeof mode.id, string])}
+            />
+          </Row>
+          {profile.endpointMode !== "automatic" ? (
+            <>
+              <Separator />
+              <div className="py-4">
+                <TextField
+                  label="Address" mono value={profile.peer ?? ""}
+                  placeholder="162.159.192.18:443"
+                  onChange={(value) => set({ peer: value || null })}
+                  error={error}
+                  help={`${canonical && canonical !== profile.peer?.trim() ? `Reads as ${canonical}. ` : ""}${
+                    profile.endpointMode === "custom-first"
+                      ? t("One attempt goes here; if it fails the core searches instead and says so.")
+                      : t("Every attempt goes here. Nothing else is tried.")
+                  }`}
+                />
+              </div>
+            </>
+          ) : profile.peer?.trim() ? (
+            <>
+              <Separator />
+              <p className="py-3.5 text-[13px] text-muted-foreground">
+                {t("A saved address is kept but not used while this is Automatic.")}
+              </p>
+            </>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-1">
+          <CardTitle className="text-[15px]">{t("Per-protocol overrides")}</CardTitle>
+          <CardDescription>{t("Left empty, each protocol uses the pinned endpoint above or its own search.")}</CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-2 gap-4 pt-2">
+          <TextField
+            label="HTTP/2 gateway" mono value={profile.h2Peer ?? ""}
+            placeholder="Automatic · IP:port"
+            onChange={(value) => set({ h2Peer: value || null })}
+          />
+          <TextField
+            label="WireGuard endpoint" mono value={profile.wgPeer ?? ""}
+            placeholder="Automatic · IP:port"
+            onChange={(value) => set({ wgPeer: value || null })}
+          />
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+// --------------------------------------------------------------------- traffic
+
+function Traffic({ profile, onChange, runtime, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  return (
+    <>
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Reach")}</CardTitle></CardHeader>
+        <CardContent className="pt-0">
+          <Row first title="Set the system proxy while connected" help={systemProxyHelp(runtime)}>
+            <Switch checked={profile.systemProxy} onCheckedChange={(systemProxy) => set({ systemProxy })} />
+          </Row>
+          <Row
+            title="Keep me connected"
+            help="Search again when a route drops. Off, a dead session stays dead, which is what you want while testing a network."
+          >
+            <Switch
+              checked={profile.autoReconnect}
+              onCheckedChange={(autoReconnect) => set({ autoReconnect })}
+            />
+          </Row>
+          <Row
+            title="Block traffic if the tunnel drops"
+            help="Applications fail rather than send traffic in the clear. Until a route comes back or you disconnect, this machine has no working proxy."
+          >
+            <Switch checked={profile.killSwitch} onCheckedChange={(killSwitch) => set({ killSwitch })} />
+          </Row>
+          <p className="pb-1 text-[13px] text-muted-foreground">
+            {t("Put back on disconnect. If the app is killed rather than closed, the next launch restores it.")}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Local proxy and DNS")}</CardTitle></CardHeader>
+        <CardContent className="grid grid-cols-2 gap-4 pt-2">
+          <TextField
+            label="Proxy address" mono value={profile.socksAddress}
+            onChange={(socksAddress) => set({ socksAddress })}
+            help="Where the SOCKS5 listener binds."
+          />
+          <TextField
+            label="DNS resolvers" mono value={profile.dns.join(", ")}
+            onChange={(value) => set({ dns: value.split(",").map((item) => item.trim()).filter(Boolean) })}
+            help={
+              profile.fullTunnel && skippedByFullTunnel(profile.dns).length > 0
+                ? "Full tunnel asks resolvers over DoH, which Cloudflare, Google and Quad9 offer. Other addresses are skipped there; with none left, it uses Cloudflare and Google."
+                : "One to eight addresses, comma separated."
+            }
+          />
+        </CardContent>
+      </Card>
+
+      <LanSharing
+        profile={profile}
+        onChange={onChange}
+        connected={snapshot.state === "connected"}
+        onToast={onToast}
+      />
+
+      <Card>
+        <CardHeader className="pb-1">
+          <CardTitle className="text-[15px]">{t("Routing rules")}</CardTitle>
+          <CardDescription>
+            {t("Blocked first, then direct; everything left over enters the tunnel. One rule per line.")}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4 pt-2">
+          <Row
+            first
+            title="Iranian sites bypass the tunnel"
+            help="Filtering only applies to traffic that looks like it left Iran, so these sites gain nothing from the tunnel and only pay for the exit's bandwidth. The list ships with the app and is not fetched."
+          >
+            <Switch
+              checked={profile.bypassIranSites}
+              onCheckedChange={(bypassIranSites) => set({ bypassIranSites })}
+            />
+          </Row>
+          <div className="grid grid-cols-2 gap-4">
+            <RulesField
+              label="Never send" value={profile.routeBlock}
+              placeholder={"keyword:doubleclick\nport:25"}
+              onChange={(routeBlock) => set({ routeBlock })}
+            />
+            <RulesField
+              label="Bypass the tunnel" value={profile.routeDirect}
+              placeholder={"private\n10.0.0.0/8"}
+              onChange={(routeDirect) => set({ routeDirect })}
+            />
+          </div>
+          <TextField
+            label="Rules file" mono value={profile.routesFile ?? ""}
+            placeholder="Optional absolute path"
+            onChange={(value) => set({ routesFile: value || null })}
+            help="Read in addition to the rules above."
+          />
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+/**
+ * Sharing this machine's tunnel with the rest of the network.
+ *
+ * The switch is the whole feature and the warning is half of it: a proxy on a
+ * network port is a proxy anyone on that network can use, and on a café or
+ * office network that is everyone. Sign-in is optional because a home network
+ * where it does not matter is the common case -- but the consequence is stated
+ * on screen while it is off, not buried in a help line nobody opens.
+ */
+function LanSharing({
+  profile,
+  onChange,
+  connected,
+  onToast,
+}: {
+  profile: ConnectionProfile;
+  onChange: (profile: ConnectionProfile) => void;
+  connected: boolean;
+  onToast: (title: string, message: string, error?: boolean) => void;
+}) {
+  const t = useT();
+  const share = profile.lanShare;
+  const [status, setStatus] = useState<LanStatus>({ running: false, address: null, open: false });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    lanShareStatus().then(setStatus).catch(() => setStatus({ running: false, address: null, open: false }));
+  }, [connected]);
+
+  /**
+   * Saves and applies together. A port or a password that was typed but never
+   * reached the listener is the worst of both: the screen says one thing and
+   * the open port does another.
+   */
+  const apply = async (patch: Partial<LanSettings>) => {
+    const next = { ...share, ...patch };
+    onChange({ ...profile, lanShare: next });
+    if (!connected && next.enabled) return;
+    setBusy(true);
+    try {
+      setStatus(await setLanShare(next));
+    } catch (error) {
+      // Put the switch back: it must not sit on over a door that never opened.
+      onChange({ ...profile, lanShare: { ...next, enabled: false } });
+      setStatus({ running: false, address: null, open: false });
+      onToast("Could not share", error instanceof Error ? error.message : String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-[15px]">{t("Share with other devices")}</CardTitle>
+        <CardDescription>
+          {t(
+            "Opens a proxy on this machine that phones, televisions and anything else on the same network can point at. They go out through whatever is carrying traffic here — the second hop when one is running, the tunnel when it is not.",
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <Row
+          first
+          title="Share this connection on my network"
+          help={
+            connected
+              ? t("The port is opened while connected and closed when you disconnect.")
+              : t("Connect first — there is nothing to share until the tunnel is carrying traffic.")
+          }
+        >
+          <Switch
+            checked={share.enabled}
+            disabled={busy || (!connected && !share.enabled)}
+            onCheckedChange={(enabled) => void apply({ enabled })}
+          />
+        </Row>
+
+        {share.enabled ? (
+          <>
+            <div className="grid grid-cols-3 gap-4 py-3">
+              <TextField
+                label="Port"
+                mono
+                value={String(share.port)}
+                onChange={(value) => {
+                  const port = Number(value.replace(/[^0-9]/g, ""));
+                  onChange({
+                    ...profile,
+                    lanShare: { ...share, port: Number.isFinite(port) ? port : 0 },
+                  });
+                }}
+                help="Typed into the other device."
+              />
+              <TextField
+                label="Username"
+                value={share.username}
+                onChange={(username) => onChange({ ...profile, lanShare: { ...share, username } })}
+                help="Optional."
+              />
+              <TextField
+                label="Password"
+                value={share.password}
+                onChange={(password) => onChange({ ...profile, lanShare: { ...share, password } })}
+                help="Optional."
+              />
+            </div>
+
+            {!share.username.trim() || !share.password.trim() ? (
+              <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/[0.08] p-3">
+                <div className="text-[12.5px] font-semibold text-amber-500">
+                  {t("No sign-in: anyone on this network can use your tunnel")}
+                </div>
+                <div className="mt-1 text-[12px] text-muted-foreground">
+                  Every device that can reach this machine — including guests and anything else on a
+                  shared or public network — can send traffic through your connection, and it will
+                  leave from your exit address. Fill in both a username and a password to require a
+                  sign-in.
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="min-w-0">
+                <div className="text-[13px] font-medium">
+                  {status.running ? t("Open") : t("Not open")}
+                </div>
+                <div className="truncate font-mono text-[11.5px] text-muted-foreground">
+                  {status.running && status.address
+                    ? `Point devices at ${status.address} — HTTP or SOCKS5, same port`
+                    : t("Apply to open the port.")}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy || !connected}
+                onClick={() => void apply({})}
+              >
+                {t("Apply")}
+              </Button>
+            </div>
+
+            <p className="pt-2 text-[12px] text-muted-foreground">
+              Windows asks to allow this the first time. Until you say yes, the port answers on this
+              machine only.
+            </p>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function systemProxyHelp(runtime: string): string {
+  const t = useT();
+  const os = runtime.split(" · ")[0]?.toLowerCase();
+  if (os === "windows") return "Sets the WinINET proxy. Most apps follow it; some bring their own settings.";
+  if (os === "macos") return "Sets the SOCKS proxy on every active network service.";
+  if (os === "linux") return "Sets the GNOME proxy. Desktops that ignore gsettings are unaffected.";
+  return t("Sets the operating system's proxy settings.");
+}
+
+// -------------------------------------------------------------------- identity
+
+function Identity(props: AdvancedProps) {
+  return (
+    <>
+      <ZeroTrust {...props} />
+      <IdentityBackup {...props} />
+    </>
+  );
+}
+
+/**
+ * The two engine errors a person can act on, as sentences this interface
+ * translates. Anything else is the engine's own words.
+ */
+const BACKUP_ERRORS: Record<string, string> = {
+  "Disconnect before importing an identity": "Disconnect before importing an identity",
+  "there is no identity to export yet": "There is no identity to export yet",
+};
+
+function IdentityBackup({ profile, snapshot, onToast }: AdvancedProps) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  // Only while nothing runs: the backend refuses otherwise, and a button that
+  // is pressable and then says no is worse than one that says why up front.
+  const idle = snapshot.state === "idle" || snapshot.state === "error";
+
+  const run = async (action: () => Promise<string>, done: string) => {
+    setBusy(true);
+    try {
+      const outcome = await action();
+      if (outcome !== "cancelled") onToast(t("Back up your identity"), t(done));
+    } catch (error) {
+      const said = error instanceof Error ? error.message : String(error);
+      onToast(t("That did not work"), BACKUP_ERRORS[said] ? t(BACKUP_ERRORS[said]) : said, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-[15px]">{t("Back up your identity")}</CardTitle>
+        <CardDescription>{t("Uninstalling deletes it, and a new one is not always free to get.")}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4 pt-2">
+        <p className="text-[13px] text-muted-foreground">
+          {t(
+            "Cloudflare limits how many identities one network can register. Reinstalling throws yours away, and after a few times it can refuse to issue another — which looks exactly like the app being broken. A backup skips all of that.",
+          )}
+        </p>
+        <Row first title="Save a backup" help="Write this device's identity to a file you keep">
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => void run(() => backupIdentity(profile), "Identity saved. Keep it somewhere safe.")}
+          >
+            {t("Save a backup")}
+          </Button>
+        </Row>
+        <Row
+          title="Restore from a backup"
+          help={idle ? "Use an identity saved from this or another device" : "Disconnect before importing an identity"}
+        >
+          <Button
+            variant="outline"
+            disabled={busy || !idle}
+            onClick={() => void run(() => restoreIdentity(profile), "Identity imported. Connect to use it.")}
+          >
+            {t("Restore from a backup")}
+          </Button>
+        </Row>
+        <p className="text-[13px] text-muted-foreground">
+          {t(
+            "Treat the file like a password: anyone who has it can present as this device. It is not encrypted, so keep it somewhere you would keep a password, and do not send it over a channel you would not send one.",
+          )}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ZeroTrust({ profile, onChange }: AdvancedProps) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-[15px]">Cloudflare Zero Trust</CardTitle>
+        <CardDescription>{t("Leave empty to stay on a personal WARP identity.")}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4 pt-2">
+        <div className="grid grid-cols-2 gap-4">
+          <TextField label="Team" value={profile.team ?? ""} placeholder="team name"
+            onChange={(value) => set({ team: value || null })} />
+          <TextField label="Email" value={profile.accessEmail ?? ""} placeholder="you@example.com"
+            onChange={(value) => set({ accessEmail: value || null })} />
+          <TextField label="Access client ID" mono value={profile.accessClientId ?? ""}
+            onChange={(value) => set({ accessClientId: value || null })} />
+          <TextField label="Access client secret" type="password" value={profile.accessClientSecret ?? ""}
+            onChange={(value) => set({ accessClientSecret: value || null })} />
+          <TextField label="Existing token" type="password" value={profile.accessToken ?? ""}
+            onChange={(value) => set({ accessToken: value || null })}
+            help="Skips sign-in when you already hold one." />
+        </div>
+        <p className="text-[13px] text-muted-foreground">
+          {t(
+            "The client secret and the token are held in memory and passed to the core through its environment. Neither is written to the profile on disk, and neither appears in a diagnostics report. The team, client ID and email are saved with the profile on this device.",
+          )}
+        </p>
+        <Separator />
+        <Row first title="Send web traffic to Gateway" help="Applies the enrolled organisation's policy. Adds a hop, and permits its logging.">
+          <Switch checked={profile.gateway} onCheckedChange={(gateway) => set({ gateway })} />
+        </Row>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------------- diagnostics
+
+function Diagnostics({ snapshot, profile, onChange, probe, logs, runtime, appVersion, onToast }: AdvancedProps) {
+  const t = useT();
+  const set = (patch: Partial<ConnectionProfile>) => onChange({ ...profile, ...patch });
+  const [includeSystem, setIncludeSystem] = useState(true);
+  const [includeSettings, setIncludeSettings] = useState(true);
+  const [includeEvents, setIncludeEvents] = useState(true);
+  const [redact, setRedact] = useState(true);
+
+  const report = useMemo(
+    () =>
+      buildReport({
+        appVersion,
+        engineVersion: probe.version,
+        engineAvailable: probe.available,
+        system: runtime,
+        snapshot,
+        profile,
+        logs,
+        options: { includeSystem, includeSettings, includeEvents, redact },
+      }),
+    [appVersion, probe.version, runtime, snapshot, profile, logs, includeSystem, includeSettings, includeEvents, redact],
+  );
+
+  return (
+    <>
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-[15px]">{t("Core and profile")}</CardTitle></CardHeader>
+        <CardContent className="flex flex-col gap-4 pt-2">
+          <div className="grid grid-cols-2 gap-4">
+            <TextField
+              label="Profile name" value={profile.name}
+              onChange={(name) => set({ name })}
+              help="Shown in reports so you can tell saved setups apart."
+            />
+            <TextField
+              label="Core executable" mono value={profile.corePath ?? ""}
+              placeholder="Auto-detect"
+              onChange={(value) => set({ corePath: value || null })}
+              help={probe.path ?? probe.message}
+            />
+          </div>
+          <Separator />
+          <Row first title="Log detail" help="Connection state is read from info-level output, so info is the floor.">
+            <Seg
+              value={profile.logLevel}
+              onChange={(logLevel) => set({ logLevel })}
+              options={[["error", "error"], ["warn", "warn"], ["info", "info"], ["debug", "debug"], ["trace", "trace"]]}
+            />
+          </Row>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-1">
+          <CardTitle className="text-[15px]">{t("Report")}</CardTitle>
+          <CardDescription>{t("Raise the log detail, reproduce the problem, then build this.")}</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <Row first title="App and engine version" help="Always included — a report without it cannot be read.">
+            <Switch checked disabled />
+          </Row>
+          <Row title="Operating system" help={runtime}>
+            <Switch checked={includeSystem} onCheckedChange={setIncludeSystem} />
+          </Row>
+          <Row title="Connection settings" help="No Zero Trust credentials and no pinned address — only whether one is set.">
+            <Switch checked={includeSettings} onCheckedChange={setIncludeSettings} />
+          </Row>
+          <Row title={`${t("Recent events (up to")} ${REPORT_EVENT_LIMIT})`} help="What the core and the supervisor did.">
+            <Switch checked={includeEvents} onCheckedChange={setIncludeEvents} />
+          </Row>
+          <Row title="Replace IP addresses" help="Swaps them for placeholders. Most problems can still be diagnosed.">
+            <Switch checked={redact} onCheckedChange={setRedact} />
+          </Row>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-4">
+          <pre className="max-h-[240px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-3 font-mono text-[11.5px] leading-relaxed">
+            {report}
+          </pre>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(report);
+                  onToast("Copied", "The report is on the clipboard.");
+                } catch (error) {
+                  onToast("Copy failed", String(error), true);
+                }
+              }}
+            >
+              {t("Copy")}
+            </Button>
+            <Button
+              onClick={async () => {
+                try {
+                  onToast("Report saved", await saveReport(report, reportFilename()));
+                } catch (error) {
+                  onToast("Save failed", error instanceof Error ? error.message : String(error), true);
+                }
+              }}
+            >
+              {t("Save report")}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </>
+  );
+}
