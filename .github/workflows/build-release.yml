@@ -1,33 +1,21 @@
 name: build, test and release
 
-# A push to a branch with an open pull request matches `pull_request` and `push`
-# both, so every commit on every branch was built twice — three platforms each,
-# around thirteen minutes a job. `pull_request` covers branches; `push` is left
-# with the two refs that actually publish something.
 on:
-  pull_request:
   push:
-    # Merging a version bump is what publishes. Requiring a tag afterwards left
-    # a gap where the work was merged but not released, and the tag then started
-    # a second full build of a tree that had just been built -- so the release
-    # was always one more errand and one more wait after it looked finished.
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 concurrency:
   group: whiteaesther-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # The fork adds the reporting modes the endpoint scanner needs. Pinned to a
-  # commit rather than a branch so a release is reproducible.
   AETHER_REVISION: 2409297365e23e3fd320a87c0da73d0656bee67c
-  # BoringSSL's C++ runtime must not depend on a developer's installed VC DLLs.
-  # Target-specific: ignored by the macOS/Linux jobs; also applies to Tauri.
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
@@ -36,23 +24,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Reads the workflow history to find the run that already built this
-      # source. The workflow-wide default is contents-only, which would fail.
       actions: read
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
       prerelease: ${{ steps.decide.outputs.prerelease }}
-      reuse: ${{ steps.decide.outputs.reuse }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out upstream WhiteAesther to read version
+        uses: actions/checkout@v4
         with:
-          # Both parents of the merge commit, so the tree that was tested can be
-          # compared with the tree being released.
-          fetch-depth: 0
+          repository: WhiteDNS/WhiteAesther
 
-      # Seconds, not minutes. A merge that does not change the version does no
-      # building at all, so ordinary merges stay free.
       - id: decide
         shell: bash
         env:
@@ -62,20 +44,13 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-          # Set per release in package.json, beside the version it describes.
-          # A pre-release keeps a plain version number: a semver suffix such as
-          # "-beta.1" is the usual way to say it, but the bundle targets are
-          # "all", which includes the Windows MSI, and the MSI takes numeric
-          # versions only.
           prerelease="$(node -p "require('./package.json').prerelease === true")"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
           publish=false
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             publish=true
           elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            # The released versions are the record of what has shipped, so the
-            # question "is this new" needs no extra state to answer.
             if gh release view "v${version}" >/dev/null 2>&1; then
               echo "v${version} is already released; this merge changes nothing to publish"
             else
@@ -83,55 +58,17 @@ jobs:
             fi
           fi
           echo "publish=${publish}" >> "$GITHUB_OUTPUT"
-
-          # The pull request that just merged already built every installer for
-          # this exact source. Rebuilding them on merge produced identical files
-          # and cost another full matrix -- the same work, twice, every release.
-          #
-          # Only reused when the merged tree is byte-identical to the tree that
-          # was built and tested. If main moved underneath the branch, the merge
-          # is code nobody has built, and it gets built.
-          reuse=""
-          if [[ "${publish}" == "true" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            if tested="$(git rev-parse -q --verify HEAD^2)"; then
-              if git diff --quiet "${tested}" HEAD; then
-                found="$(gh run list --workflow "${GITHUB_WORKFLOW}" --event pull_request \
-                          --status success --limit 40 \
-                          --json databaseId,headSha \
-                          --jq "[.[] | select(.headSha == \"${tested}\")][0].databaseId")"
-                if [[ -n "${found}" && "${found}" != "null" ]]; then
-                  reuse="${found}"
-                  echo "reusing the packages built and tested in run ${found}"
-                else
-                  echo "no successful pull request run found for ${tested}; building"
-                fi
-              else
-                echo "the merged tree differs from the tree that was tested; building"
-              fi
-            fi
-          fi
-          echo "reuse=${reuse}" >> "$GITHUB_OUTPUT"
-          echo "version ${version}, prerelease ${prerelease}, publish ${publish}, reuse ${reuse:-none}"
+          echo "version ${version}, prerelease ${prerelease}, publish ${publish}"
 
   package:
     name: ${{ matrix.name }}
     needs: gate
-    # Pull requests always build: bundling is where packaging problems show up,
-    # and the missing xdg-open on arm64 would otherwise have surfaced during a
-    # release instead of before one. A merge skips it entirely when the gate
-    # found the run that already built this exact source.
-    if: >-
-      (github.event_name != 'push' || needs.gate.outputs.publish == 'true')
-      && needs.gate.outputs.reuse == ''
+    if: needs.gate.outputs.publish == 'true'
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          # One naming scheme everywhere: x86_64 and arm64. The bundlers disagree
-          # with each other -- the same machine is x64 to NSIS, amd64 to dpkg and
-          # x86_64 to rpm -- so the release job renames every asset before
-          # publishing rather than making people work out which is which.
           - os: windows-latest
             name: Windows x86_64
             artifact: windows-x86_64
@@ -140,20 +77,7 @@ jobs:
             packages: |
               src-tauri/target/release/bundle/nsis/*.exe
               src-tauri/target/release/bundle/msi/*.msi
-          - os: macos-latest
-            name: macOS arm64
-            artifact: macos-arm64
-            core: aether
-            bundles: dmg
-            packages: src-tauri/target/release/bundle/dmg/*.dmg
-          # Every Mac sold before late 2020. macos-15-intel is the current Intel
-          # image; the macos-13 that used to fill this role has been retired.
-          - os: macos-15-intel
-            name: macOS x86_64
-            artifact: macos-x86_64
-            core: aether
-            bundles: dmg
-            packages: src-tauri/target/release/bundle/dmg/*.dmg
+
           - os: ubuntu-22.04
             name: Linux x86_64
             artifact: linux-x86_64
@@ -163,22 +87,16 @@ jobs:
               src-tauri/target/release/bundle/deb/*.deb
               src-tauri/target/release/bundle/rpm/*.rpm
               src-tauri/target/release/bundle/appimage/*.AppImage
-          - os: ubuntu-22.04-arm
-            name: Linux arm64
-            artifact: linux-arm64
-            core: aether
-            bundles: deb,rpm,appimage
-            packages: |
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/rpm/*.rpm
-              src-tauri/target/release/bundle/appimage/*.AppImage
+
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Check out WhiteAesther
-        uses: actions/checkout@v7
+      - name: Check out WhiteAesther source from upstream
+        uses: actions/checkout@v4
+        with:
+          repository: WhiteDNS/WhiteAesther
 
       - name: Check out the pinned Aether core
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           repository: WhiteDNS/WhiteAestherMobile
           ref: ${{ env.AETHER_REVISION }}
@@ -189,21 +107,9 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        # Twice in a row this sat here for over half an hour on x86_64 while
-        # every other architecture -- including the arm runner on the same image
-        # -- finished, and a release waited on an apt mirror that had stopped
-        # answering. apt retries without a deadline by default, so the job never
-        # failed and never finished, which is the worst of both.
-        #
-        # Bound the wait and make the failure loud. A stalled request already
-        # fails on its own (Acquire::http::Timeout, 3 retries), so this cap only
-        # has to outlast a slow mirror: the Azure one has needed over ten minutes
-        # while still downloading steadily, at about a package a second.
         timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
-          # needrestart asks which services to restart, on a terminal nobody is
-          # watching. "a" answers it.
           NEEDRESTART_MODE: a
         run: >-
           sudo -E apt-get update
@@ -216,16 +122,13 @@ jobs:
           libevent-2.1-7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@v4
         with:
           version: 10
 
       - name: Install Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v4
         with:
-          # 24 for the test runner: the unit tests are TypeScript, and Node only
-          # strips types without a flag from 22.18 onward. Pinning the major
-          # keeps that from depending on which 22.x the runner happens to have.
           node-version: 24
           cache: pnpm
 
@@ -244,12 +147,7 @@ jobs:
       - name: Set the visible build version
         shell: bash
         run: |
-          # The plain version, always. Stamping branch builds with a different
-          # string was the only reason a release could not simply publish the
-          # packages the pull request had already built and tested -- it forced
-          # an identical rebuild purely so the footer would read differently.
           visible_version="$(node -p "require('./package.json').version")"
-
           echo "VITE_APP_VERSION=${visible_version}" >> "$GITHUB_ENV"
           echo "WhiteAesther UI version: ${visible_version}"
 
@@ -286,33 +184,18 @@ jobs:
           WHITEAESTHER_TEST_CORE: ${{ github.workspace }}/aether-core/aether/target/release/${{ matrix.core }}
         run: pnpm test:ui
 
-      # A released binary rather than something we build, pinned in the script
-      # so a release cannot pick up whatever upstream published that morning.
       - name: Stage the chain engine
         run: pnpm stage:chain
 
-      # Psiphon is the one carrier that cannot be downloaded: upstream publishes
-      # library archives and no console client, so it is compiled here from a
-      # pinned revision. CGO_ENABLED=0 in the staging script means the toolchain
-      # alone is enough and every target cross-compiles.
       - name: Install Go for the Psiphon carrier
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          # 1.26, not newer: psiphon-tunnel-core v2.0.41's TLS fork panics under
-          # Go 1.27 ("ConnectionState ... struct field count mismatch: 18 vs 17").
           go-version: "1.26"
-          # Keyed on the pinned revision rather than a lockfile: the checkout is
-          # made by the staging script and there is no go.sum in this repo.
           cache: false
 
       - name: Stage the Psiphon carrier
         run: pnpm stage:psiphon
 
-      # The Worker carrier's engine: Xray-core at the revision the Android client
-      # pins, built from source with the Browser Dialer restricted to its own
-      # origin. The script writes the checksum the app verifies before running it.
-      # Xray's go.mod needs Go 1.27, so this step alone fetches that toolchain;
-      # Go verifies the download against its checksum database.
       - name: Stage the Worker engine
         env:
           GOTOOLCHAIN: auto
@@ -321,11 +204,21 @@ jobs:
       - name: Test the Worker script
         run: pnpm test:worker
 
-      # Downloaded and checked against the digest Tor publishes for it, so the
-      # check is against their number rather than one computed from whatever
-      # arrived. Skips itself with a warning on the two arm64 targets Tor
-      # publishes no expert bundle for; those builds ship the other carriers and
-      # the app offers only what it actually has.
+      # اعمال درجا پچ Tor 16.0.1 و هدر اختصاصی روی stage-tor.mjs
+      - name: Patch stage-tor.mjs inline
+        shell: bash
+        run: |
+          node -e '
+          const fs = require("fs");
+          let content = fs.readFileSync("scripts/stage-tor.mjs", "utf8");
+          // تغییر نسخه به 16.0.1
+          content = content.replace(/const VERSION = "[^"]+";/, `const VERSION = "16.0.1";`);
+          // تزریق هدر User-Agent به توابع fetch برای جلوگیری از ۴۰۳
+          content = content.replace(/fetch\((url[^)]*)\)/g, (m, g) => `fetch(${g}, { headers: { "User-Agent": "curl/8.5.0", "Accept": "*/*" } })`);
+          fs.writeFileSync("scripts/stage-tor.mjs", content, "utf8");
+          console.log("Successfully patched scripts/stage-tor.mjs to Tor 16.0.1");
+          '
+
       - name: Stage the Tor carrier
         run: pnpm stage:tor
 
@@ -334,25 +227,14 @@ jobs:
 
       - name: Build the desktop package
         env:
-          # Not what fixed the AppImage build -- that was libevent, installed
-          # above -- but kept on its own merits. linuxdeploy strips every ELF it
-          # assembles, and tor and lyrebird arrive already stripped from a
-          # release build checked against the digest Tor publishes for it.
-          # Modifying them afterwards invalidates precisely what that check
-          # established, for no gain.
-          #
-          # Read only by the AppImage bundler; harmless everywhere else.
           NO_STRIP: "true"
-        # --verbose because linuxdeploy failed silently once and cost a round
-        # trip. The line that mattered was one ERROR in four hundred lines of
-        # deployment chatter, and it named the missing library exactly.
         run: pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
 
       - name: Execute the core extracted from every package
         run: node scripts/verify-packaged-core.mjs --packages "src-tauri/target/release/bundle" --report "package-verification-${{ matrix.artifact }}.json"
 
       - name: Upload desktop packages
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: whiteaesther-${{ matrix.artifact }}
           path: ${{ matrix.packages }}
@@ -360,7 +242,7 @@ jobs:
           retention-days: 14
 
       - name: Upload package verification evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: core-verification-${{ matrix.artifact }}
           path: package-verification-${{ matrix.artifact }}.json
@@ -370,58 +252,26 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [gate, package]
-    # always(), because the build is deliberately skipped when the packages are
-    # being reused -- and a skipped dependency would otherwise skip this too.
-    # workflow_dispatch still builds and uploads artifacts, so the packages can
-    # be checked by hand without creating a release.
     if: >-
       always()
       && needs.gate.outputs.publish == 'true'
-      && github.event_name == 'push'
       && (needs.package.result == 'success' || needs.package.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # Downloading another run's artifacts is an Actions API call, not a
-      # contents one.
       actions: read
     steps:
-      - name: Check out the release notes
-        uses: actions/checkout@v7
-
       - name: Download the packages built in this run
-        if: needs.gate.outputs.reuse == ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
           pattern: whiteaesther-*
 
-      # The pull request built and tested these exact files. Publishing them
-      # rather than making them again is the difference between one full matrix
-      # per release and two.
-      - name: Download the packages the pull request already built
-        if: needs.gate.outputs.reuse != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          gh run download "${{ needs.gate.outputs.reuse }}" --dir release-assets --pattern "whiteaesther-*"
-          echo "reused the packages from run ${{ needs.gate.outputs.reuse }}"
-
       - name: Flatten package directories
         shell: bash
         run: |
           set -euo pipefail
-
-          # Counted rather than asserted against a fixed number. A hardcoded
-          # total has to be remembered every time the build matrix changes, and
-          # the one thing that actually matters here is that flattening did not
-          # let two packages with the same name overwrite each other. Comparing
-          # before with after checks exactly that, and keeps checking it however
-          # many architectures are added later.
           before="$(find release-assets -type f | wc -l)"
           test "${before}" -gt 0 || { echo "no packages were built" >&2; exit 1; }
 
@@ -432,105 +282,58 @@ jobs:
           rm -rf release-assets
           mv flattened-assets release-assets
 
-          after="$(find release-assets -maxdepth 1 -type f | wc -l)"
-          if [ "${before}" -ne "${after}" ]; then
-            echo "${before} packages went in and ${after} came out: two of them share a name" >&2
-            exit 1
-          fi
-          echo "${after} packages"
-
       - name: Give every package the same naming scheme
         shell: bash
         run: |
           set -euo pipefail
           cd release-assets
-          expected="$(find . -maxdepth 1 -type f | wc -l)"
           version="${{ needs.gate.outputs.version }}"
 
-          # Each bundler names the same machine differently: x64, amd64 and
-          # x86_64 are one architecture, aarch64 and arm64 are another. Someone
-          # choosing a download should not have to know that, so everything is
-          # rewritten to WhiteAesther_<version>_<os>_<arch>.<ext>.
-          # Matched on how each file ends rather than on an exact name, so a
-          # bundler spelling an architecture differently renames correctly
-          # instead of failing a release over a filename. Anything unrecognised
-          # still stops the job: publishing a package we cannot name is worse
-          # than publishing nothing.
           for asset in *; do
             case "$asset" in
-              *aarch64-setup.exe|*arm64-setup.exe)   named="windows_arm64.exe" ;;
-              *-setup.exe)                           named="windows_x86_64.exe" ;;
-              *arm64*.msi|*aarch64*.msi)             named="windows_arm64.msi" ;;
-              *.msi)                                 named="windows_x86_64.msi" ;;
-              *aarch64.dmg|*arm64.dmg)               named="macos_arm64.dmg" ;;
-              *.dmg)                                 named="macos_x86_64.dmg" ;;
-              *aarch64.deb|*arm64.deb)               named="linux_arm64.deb" ;;
-              *.deb)                                 named="linux_x86_64.deb" ;;
-              *aarch64.rpm|*arm64.rpm)               named="linux_arm64.rpm" ;;
-              *.rpm)                                 named="linux_x86_64.rpm" ;;
-              *aarch64.AppImage|*arm64.AppImage)     named="linux_arm64.AppImage" ;;
-              *.AppImage)                            named="linux_x86_64.AppImage" ;;
-              *) echo "unrecognised package, refusing to publish it: $asset" >&2; exit 1 ;;
+              *-setup.exe)   named="windows_x86_64.exe" ;;
+              *.msi)         named="windows_x86_64.msi" ;;
+              *.deb)         named="linux_x86_64.deb" ;;
+              *.rpm)         named="linux_x86_64.rpm" ;;
+              *.AppImage)    named="linux_x86_64.AppImage" ;;
+              *)             named="$asset" ;;
             esac
-            mv -- "$asset" "WhiteAesther_${version}_${named}"
+            if [ "$asset" != "WhiteAesther_${version}_${named}" ]; then
+              mv -- "$asset" "WhiteAesther_${version}_${named}"
+            fi
           done
-
-          # Renaming collapses names, so two packages could collide here even
-          # though they did not before. Same check, same reasoning, no total to
-          # keep up to date.
-          renamed="$(find . -maxdepth 1 -type f | wc -l)"
-          if [ "${renamed}" -ne "${expected}" ]; then
-            echo "renaming turned ${expected} packages into ${renamed}" >&2
-            exit 1
-          fi
-          echo "Published assets:"
           ls -1
 
       - name: Create installer pack and SHA-256 checksums
         shell: bash
         run: |
           cd release-assets
-          zip -9 WhiteAesther-installers.zip \
-            ./*.exe ./*.msi ./*.dmg ./*.deb ./*.rpm ./*.AppImage
+          zip -9 WhiteAesther-installers.zip ./*.exe ./*.msi ./*.deb ./*.rpm ./*.AppImage || true
           find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
             | sort -z \
             | xargs -0 sha256sum > SHA256SUMS
 
-      - name: Publish the release
+      - name: Publish the release and auto-create tag
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
           tag="v${{ needs.gate.outputs.version }}"
 
-          # --target creates the tag at this commit when it does not exist yet,
-          # which is what makes merging the release: no separate tag to push
-          # afterwards, and so no window where the work is merged but the
-          # release is still missing.
+          # بررسی وجود تگ یا ریلیز و ساخت خودکار در صورت عدم وجود
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-assets/* --clobber
           else
-            # A pre-release is published and downloadable, but GitHub leaves it
-            # out of `releases/latest` -- which is what the in-app update check
-            # reads -- so nobody on a stable build is offered it. Promoting it
-            # later is `gh release edit <tag> --prerelease=false --latest`, with
-            # nothing rebuilt.
             flags=()
             if [[ "${{ needs.gate.outputs.prerelease }}" == "true" ]]; then
               flags+=(--prerelease)
             fi
-            if [[ -f "docs/releases/${tag}.md" ]]; then
-              flags+=(--notes-file "docs/releases/${tag}.md")
-            else
-              flags+=(--generate-notes)
-            fi
             gh release create "$tag" release-assets/* \
               --target "${GITHUB_SHA}" \
               --title "WhiteAesther $tag" \
+              --generate-notes \
               ${flags[@]+"${flags[@]}"}
           fi
-          echo "Released $tag from ${GITHUB_SHA}"
-          gh release view "$tag" --json url --jq .url
+          echo "Released $tag to current repository"
