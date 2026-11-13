@@ -1,0 +1,662 @@
+/**
+ * Persian and English, and the direction each is read in.
+ *
+ * Keyed by the English sentence rather than by an invented identifier
+ * (`simple.headline.connected`). Two reasons. A key missing from the dictionary
+ * falls back to itself, which is a correct English interface rather than a
+ * screen full of dotted identifiers — so a half-finished translation degrades
+ * into the thing we started with. And a translator reads the source sentence at
+ * the point of use instead of chasing a name through two files.
+ *
+ * The cost is that editing an English string silently orphans its translation.
+ * A test walks the source tree and fails on any orphan, which turns that from a
+ * thing someone notices in production into a thing CI says out loud.
+ *
+ * No i18n library. For one language pair, react-i18next is a dependency and a
+ * bundle for interpolation, plurals, namespaces and loaders we do not use —
+ * this is a lookup and a listener.
+ */
+
+import { WORKER_FA } from "./worker-i18n.ts";
+
+export type Language = "en" | "fa";
+
+/** Right to left is a property of the language, so it is decided here. */
+export const DIRECTION: Record<Language, "ltr" | "rtl"> = { en: "ltr", fa: "rtl" };
+
+const STORAGE_KEY = "whiteaesther.language";
+
+/**
+ * Persian for everything a person meets before they ever open Advanced.
+ *
+ * Translated for sense, not word by word. "You're through" is an English idiom
+ * that becomes nonsense carried across literally, and a status line nobody
+ * understands is worse than an English one they can paste into a search.
+ */
+const FA: Record<string, string> = {
+  ...WORKER_FA,
+  "ClientHello shape": "شکل ClientHello",
+  "Automatic recovery also tries these TLS record layouts.": "بازیابی خودکار این شکل‌های رکورد TLS را هم امتحان می‌کند.",
+  "TCP fragments": "تکه‌های TCP",
+  "TLS records": "رکوردهای TLS",
+  "Compact records": "رکوردهای فشرده",
+  "Split inside the server name": "تکه‌کردن درون نام سرور",
+  "Keeps the SNI boundary inside separate writes.": "بخش SNI را در ارسال‌های جداگانه قرار می‌دهد.",
+  "Empty uses the core default.": "خالی بماند تا پیش‌فرض هسته استفاده شود.",
+  "MASQUE server name": "نام سرور MASQUE",
+  "WARP API host": "میزبان API وارپ",
+  "WARP API server name": "نام سرور API وارپ",
+  "TLS 1.3 cipher suites": "مجموعه‌رمزهای TLS 1.3",
+  "TLS key shares": "سهم‌های کلید TLS",
+  "TLS signature algorithms": "الگوریتم‌های امضای TLS",
+  "Certificate compression": "فشرده‌سازی گواهی",
+  "ALPS codepoint": "کد ALPS",
+  "TLS trust anchor IDs": "شناسه‌های لنگر اعتماد TLS",
+  "TLS server padding": "پدینگ سرور TLS",
+  "Enable GREASE signature algorithms": "فعال‌کردن الگوریتم‌های امضای GREASE",
+  "Enable ECH GREASE": "فعال‌کردن ECH GREASE",
+  "Disable OCSP stapling request": "غیرفعال‌کردن درخواست OCSP stapling",
+  "Disable signed certificate timestamps request": "غیرفعال‌کردن درخواست زمان‌مهرهای گواهی",
+  "Disable session tickets": "غیرفعال‌کردن بلیت‌های نشست",
+  "Disable TLS extension permutation": "غیرفعال‌کردن جابه‌جایی افزونه‌های TLS",
+  "Changes the TLS handshake fingerprint.": "اثر انگشت دست‌دادن TLS را تغییر می‌دهد.",
+  "TLS and ECH": "TLS و ECH",
+  "Applies to Aether handshakes and registration, including Aether hops in a carrier chain.": "برای دست‌دادن و ثبت‌نام Aether، از جمله مرحله‌های Aether در زنجیرهٔ carrier اعمال می‌شود.",
+
+  "Obfuscation applies to WireGuard. Manual TLS and ECH settings also affect WARP registration.": "مبهم‌سازی برای WireGuard است. تنظیمات دستی TLS و ECH روی ثبت‌نام WARP هم اثر دارند.",
+  "Applies to MASQUE H2, including the outer H2 hop of nested transports.": "برای MASQUE H2، از جمله مرحلهٔ بیرونی H2 در تونل‌های تودرتو اعمال می‌شود.",
+  "Hides the name on H2/H3 and WARP registration. A requested ECH attempt fails if no usable key is offered or accepted.": "نام سرور را در H2/H3 و ثبت‌نام WARP پنهان می‌کند. تلاش ECH بدون ارائه یا پذیرش کلید قابل استفاده شکست می‌خورد.",
+  "Key exchange groups in order, separated by ':'. Empty uses the core default.": "گروه‌های تبادل کلید به ترتیب و با جداکنندهٔ :؛ مقدار خالی یعنی پیش‌فرض هسته.",
+  "TLS 1.2 cipher suites": "رمزهای TLS 1.2",
+  "Disable GREASE": "غیرفعال‌کردن GREASE",
+  "WARP registration address": "آدرس ثبت‌نام WARP",
+  "ECH resolver": "حل‌کنندهٔ ECH",
+  "ECH key domain": "دامنهٔ کلید ECH",
+  "Verified edges": "گیت‌وی‌های شناخته‌شده",
+  "Outer MASQUE framing": "روش انتقال MASQUE بیرونی",
+  "WireGuard inside MASQUE. The outer hop can use H2 or H3.": "WireGuard درون MASQUE؛ مرحلهٔ بیرونی می‌تواند H2 یا H3 باشد.",
+  "Prioritises known gateways and verifies the current path. Historical results do not guarantee reachability.": "گیت‌وی‌های شناخته‌شده را در اولویت می‌گذارد و مسیر فعلی را آزمایش می‌کند. نتایج تاریخی تضمین دسترسی نیستند.",
+  "BoringSSL names separated by ':'. Empty uses the core default. Does not select TLS 1.3 cipher suites.": "نام‌های BoringSSL با جداکنندهٔ :؛ مقدار خالی یعنی پیش‌فرض هسته. رمزهای TLS 1.3 را تعیین نمی‌کند.",
+  "Optional host/IP with a port; default 443. Changes registration's network destination while preserving its Host, SNI and certificate checks.": "نام میزبان یا IP با پورت اختیاری؛ پیش‌فرض ۴۴۳. مقصد شبکهٔ ثبت‌نام را تغییر می‌دهد؛ Host، SNI و بررسی گواهی حفظ می‌شوند.",
+  "udp://IP, tcp://IP or https:// DoH. Empty uses protected DoH through the upstream carrier. Saved while ECH is off, used only when on.": "قالب udp://IP، tcp://IP یا DoH با https://. مقدار خالی از DoH محافظت‌شده از مسیر carrier استفاده می‌کند. هنگام خاموش‌بودن ECH ذخیره می‌شود ولی فعال نیست.",
+  "Domain with the HTTPS record containing the ECH key. Empty uses cloudflare-ech.com.": "دامنهٔ رکورد HTTPS حامل کلید ECH؛ مقدار خالی یعنی cloudflare-ech.com.",
+  "Off by default: GREASE remains enabled. Does not disable encryption or certificate verification.": "پیش‌فرض خاموش است و GREASE فعال می‌ماند. رمزگذاری و بررسی گواهی را خاموش نمی‌کند.",
+
+  // -- the shell -------------------------------------------------------------
+  "Search settings": "جستجوی تنظیمات",
+  Simple: "ساده",
+  Advanced: "پیشرفته",
+  "Advanced settings": "تنظیمات پیشرفته",
+  Language: "زبان",
+  "Traffic is blocked, not broken": "ترافیک مسدود شده، نه خراب",
+  "The tunnel is down and your system proxy still points at it, so nothing leaves in the clear.":
+    "تونل قطع است و پروکسی سیستم هنوز به آن اشاره می‌کند، پس هیچ چیزی بدون رمز خارج نمی‌شود.",
+  "Restore my connection": "اتصال من را برگردان",
+  "Restarted with permission": "با دسترسی لازم دوباره اجرا شد",
+  "Full tunnel is ready. Press Connect when you want it.":
+    "تونل کامل آماده است. هر وقت خواستید، اتصال را بزنید.",
+  "Action failed": "انجام نشد",
+
+  // -- the update notice -----------------------------------------------------
+  "Get it": "دریافت",
+  "Dismiss this update": "بستن این اطلاع",
+  "is available": "منتشر شده است",
+  "You are running": "نسخهٔ فعلی شما",
+  "Opening this takes you to the download page.": "با باز کردن این، به صفحهٔ دانلود می‌روید.",
+  "Connection restored": "اتصال برگردانده شد",
+  "Your system proxy has been put back.": "پروکسی سیستم به حالت قبل برگشت.",
+
+  // -- the orb and the headline ---------------------------------------------
+  Connected: "متصل",
+  Searching: "در حال جستجو",
+  Stopped: "متوقف",
+  "Tap to connect": "برای اتصال بزنید",
+  "You're through": "راه باز شد",
+  "Testing paths out": "در حال آزمودن راه‌های خروج",
+  "Nothing got out": "هیچ راهی باز نشد",
+  "Ready when you are": "هر وقت آماده بودید",
+  "Testing paths out of this network.": "راه‌های خروج از این شبکه آزموده می‌شوند.",
+  "Every path was refused.": "همهٔ راه‌ها بسته بودند.",
+  "WhiteAesther finds a route that works here.":
+    "وایت‌آستر خودش مسیری پیدا می‌کند که اینجا کار کند.",
+
+  // -- the buttons -----------------------------------------------------------
+  Connect: "اتصال",
+  Disconnect: "قطع اتصال",
+  Stop: "توقف",
+  "Aether core not found": "هستهٔ Aether پیدا نشد",
+  "Try again with Stealth": "دوباره با حالت مخفی",
+  "Speed test": "تست سرعت",
+  "Speed test failed": "تست سرعت انجام نشد",
+  "Measuring…": "در حال اندازه‌گیری…",
+  "Build a report": "ساخت گزارش",
+  "Open Advanced": "باز کردن پیشرفته",
+
+  // -- what the connection is doing -----------------------------------------
+  Edge: "دروازه",
+  Transport: "پروتکل",
+  Latency: "تأخیر",
+  Uptime: "مدت اتصال",
+  "Round-trip through the tunnel": "زمان رفت و برگشت از تونل",
+  "Measured every 5 s through the tunnel. Last 80 seconds.":
+    "هر ۵ ثانیه از داخل تونل اندازه‌گیری می‌شود. ۸۰ ثانیهٔ اخیر.",
+  "Taking the first measurement…": "در حال گرفتن اولین اندازه…",
+  min: "کمینه",
+  avg: "میانگین",
+  max: "بیشینه",
+  loss: "از دست‌رفته",
+  now: "اکنون",
+
+  // -- what the outside world sees ------------------------------------------
+  "What websites see": "چیزی که سایت‌ها می‌بینند",
+  "Checking…": "در حال بررسی…",
+  "Through your node": "از نود شما",
+  "Through the tunnel": "از تونل",
+  "Not through the tunnel": "خارج از تونل",
+
+  // -- the two switches ------------------------------------------------------
+  "Keep me connected": "اتصال را نگه دار",
+  "Reconnect automatically if the route drops": "اگر مسیر قطع شد، خودکار دوباره وصل شود",
+  "Block traffic if the tunnel drops": "اگر تونل قطع شد، ترافیک را مسدود کن",
+  "Apps fail closed. Disconnect to put the proxy back.":
+    "برنامه‌ها به‌جای نشت، قطع می‌شوند. برای بازگرداندن پروکسی، اتصال را قطع کنید.",
+  "Apps fail closed instead of leaking": "برنامه‌ها به‌جای نشت کردن، قطع می‌شوند",
+
+  // -- while it is searching -------------------------------------------------
+  "What it is trying": "کاری که در حال انجام است",
+  "Device identity ready": "شناسهٔ دستگاه آماده شد",
+  "Retries alternate the two MASQUE transports on their own. Nothing to do.":
+    "تلاش‌های بعدی خودشان بین دو پروتکل MASQUE جابه‌جا می‌شوند. کاری لازم نیست.",
+
+  // -- before it starts ------------------------------------------------------
+  "What will happen": "چه اتفاقی می‌افتد",
+  "The route is found for you. These are the settings it will start from.":
+    "مسیر برای شما پیدا می‌شود. اتصال با این تنظیمات آغاز خواهد شد.",
+  Protocol: "پروتکل",
+  "Search depth": "عمق جستجو",
+  Addresses: "نوع آدرس",
+  "IPv4 and IPv6": "IPv4 و IPv6",
+  Gateway: "دروازه",
+  "found automatically": "خودکار پیدا می‌شود",
+  pinned: "ثابت‌شده",
+  "Local proxy": "پروکسی محلی",
+
+  // -- when nothing worked ---------------------------------------------------
+  "Three things to try, in order": "سه کار را به ترتیب امتحان کنید",
+  Stealth: "مخفی",
+  Aggressive: "تهاجمی",
+  "IPv4 only": "فقط IPv4",
+
+  // -- how far the tunnel reaches -------------------------------------------
+  "This app only": "فقط همین برنامه",
+  "Whole machine": "کل دستگاه",
+  "Full tunnel": "تونل کامل",
+  "Local proxy on {address}": "پروکسی محلی روی {address}",
+  "Sets your system proxy": "پروکسی سیستم را تنظیم می‌کند",
+  "Every app, even ones that ignore proxies":
+    "همهٔ برنامه‌ها، حتی آن‌هایی که پروکسی را نادیده می‌گیرند",
+  "Your system proxy is set, and will be put back when you disconnect.":
+    "پروکسی سیستم تنظیم شده و با قطع اتصال به حالت قبل برمی‌گردد.",
+  "Every app is captured through a network device, including the ones that ignore proxy settings.":
+    "همهٔ برنامه‌ها از طریق یک کارت شبکه گرفته می‌شوند، حتی آن‌هایی که تنظیمات پروکسی را نادیده می‌گیرند.",
+
+  // Split around the address rather than templated whole: Persian puts the
+  // verb last, so one string with a {placeholder} would have pinned English
+  // word order into the translation.
+  "Point apps at": "برنامه‌ها را به آدرس",
+  "to use it.": "وصل کنید",
+
+  "or press": "یا بزنید",
+  "no reply": "بی‌پاسخ",
+  "testing gateways": "در حال آزمودن دروازه‌ها",
+  Attempt: "تلاش",
+  of: "از",
+  "Retries try other connection methods automatically, up to":
+    "تلاش‌های بعدی خودکار روش‌های دیگر اتصال را امتحان می‌کنند، تا",
+  "attempts.": "بار.",
+  "Switch search depth to": "عمق جستجو را بگذارید روی",
+  "quieter probing, slower to connect": "آزمودن کم‌سروصداتر، اتصال کندتر",
+  "Set addresses to": "نوع آدرس را بگذارید روی",
+  "if this network handles IPv6 badly": "اگر این شبکه با IPv6 مشکل دارد",
+  "Turn obfuscation up to": "مبهم‌سازی را ببرید روی",
+
+  // The stored profile values the Idle card prints back. Translated because
+  // they are shown to the reader, not because anything matches on them.
+  turbo: "پرسرعت",
+  balanced: "متعادل",
+  thorough: "دقیق",
+  stealth: "مخفی",
+  ironclad: "حداکثری",
+
+  // -- the Advanced screen ---------------------------------------------------
+  // Reached through the primitives in panels.tsx rather than by a call at each
+  // use site, so a control added later is translated by construction.
+  "Settings sections": "بخش‌های تنظیمات",
+  "Core": "هسته",
+  "WhiteAesther": "وایت‌آستر",
+  "This application. Source at github.com/WhiteDNS/WhiteAesther": "همین برنامه. کد منبع در github.com/WhiteDNS/WhiteAesther",
+  "The connection engine, shipped as a binary and run by this app. Aether 1.8.0": "موتور اتصال، که به‌صورت یک فایل اجرایی همراه برنامه می‌آید و توسط آن اجرا می‌شود. Aether 1.8.0",
+  "The second hop behind Exit chain, run as a separate program. Source at github.com/MetaCubeX/mihomo at tag v1.19.30": "پرش دوم پشت زنجیرهٔ خروج، که به‌عنوان یک برنامهٔ جدا اجرا می‌شود. کد منبع در github.com/MetaCubeX/mihomo، تگ v1.19.30",
+  "Iran routing lists": "لیست‌های مسیریابی ایران",
+  "The addresses and domains behind “Iranian sites bypass the tunnel”, bundled as data. Source at github.com/Chocolate4U/Iran-clash-rules": "آدرس‌ها و دامنه‌های پشت گزینهٔ «سایت‌های ایرانی از تونل خارج شوند»، که به‌صورت داده همراه برنامه‌اند. منبع: github.com/Chocolate4U/Iran-clash-rules",
+  "Deeper searches take longer but survive stricter filtering.": "جستجوی عمیق‌تر بیشتر طول می‌کشد ولی از فیلترینگ سخت‌گیرتر عبور می‌کند.",
+  "Turn off IPv6 where the network handles it badly.": "در شبکه‌هایی که IPv6 را درست هندل نمی‌کنند، خاموشش کنید.",
+  "Reuse the last working edge": "استفادهٔ دوباره از آخرین دروازهٔ سالم",
+  "Verify the cached gateway before scanning fresh.": "قبل از جستجوی تازه، دروازهٔ ذخیره‌شده را بررسی می‌کند.",
+  "End-to-end data check": "بررسی عبور واقعی داده",
+  "Expose the proxy only after a real tunnelled request succeeds.": "پروکسی فقط بعد از موفق شدن یک درخواست واقعی از داخل تونل، در دسترس قرار می‌گیرد.",
+  "Resource profile": "میزان مصرف منابع",
+  "How much concurrency the core gives the scan.": "هسته چقدر همزمانی به جستجو اختصاص می‌دهد.",
+  "Validation deadline": "مهلت اعتبارسنجی",
+  "sec": "ثانیه",
+  "Startup deadline": "مهلت راه‌اندازی",
+  "Reconnect delay": "فاصلهٔ اتصال مجدد",
+  "Split the TLS opening": "تکه‌تکه کردن شروع TLS",
+  "Fragment size": "اندازهٔ تکه",
+  "Bytes per write, or a range like 16-32.": "تعداد بایت در هر نوبت نوشتن، یا یک بازه مثل 16-32.",
+  "Fragment delay": "فاصلهٔ بین تکه‌ها",
+  "Milliseconds between writes, or a range.": "میلی‌ثانیه بین هر نوبت نوشتن، یا یک بازه.",
+  "Obfuscation profile": "پروفایل مبهم‌سازی",
+  "Padding that makes tunnel traffic harder to fingerprint.": "پرکننده‌ای که تشخیص الگوی ترافیک تونل را سخت‌تر می‌کند.",
+  "Try other obfuscation profiles": "امتحان کردن پروفایل‌های دیگر مبهم‌سازی",
+  "On WireGuard, fall back through the other profiles when one finds nothing.": "روی WireGuard، اگر یک پروفایل چیزی پیدا نکرد، بقیه را هم امتحان می‌کند.",
+  "WireGuard keepalive": "زنده‌نگه‌داری WireGuard",
+  "How often to hold the UDP mapping open. Zero leaves it to the engine.": "هر چند وقت یک بار نگاشت UDP باز نگه داشته شود. صفر یعنی تصمیمش با موتور.",
+  "Match domain rules on sniffed names": "تطبیق قوانین دامنه با نام استخراج‌شده",
+  "Reads the host name from the first bytes of a connection, so rules written as domains still match when a program connects to a bare address. Off, those rules only match when a name was supplied.": "نام میزبان را از بایت‌های اول اتصال می‌خواند، پس قوانینی که به‌صورت دامنه نوشته شده‌اند وقتی برنامه‌ای مستقیم به یک آدرس وصل می‌شود هم تطبیق پیدا می‌کنند. خاموش که باشد، آن قوانین فقط وقتی کار می‌کنند که نام داده شده باشد.",
+  "Register again if the identity is refused": "ثبت‌نام مجدد در صورت رد شدن شناسه",
+  "Cloudflare sometimes stops accepting a saved device, and the handshake then succeeds while nothing passes. Off, the refusal is reported and the identity kept — which is what you want while diagnosing an account, and not otherwise.": "کلادفلر گاهی یک دستگاه ذخیره‌شده را دیگر قبول نمی‌کند، و آن وقت دست‌دادن موفق می‌شود ولی هیچ چیزی رد نمی‌شود. خاموش که باشد، رد شدن گزارش می‌شود و شناسه نگه داشته می‌شود — که همان چیزی است که موقع عیب‌یابی یک حساب می‌خواهید، و در بقیهٔ مواقع نه.",
+  "off, auto, or base64": "off یا auto یا base64",
+  "TLS groups": "گروه‌های TLS",
+  "Dial through a local proxy": "اتصال از طریق یک پروکسی محلی",
+  "The endpoint search goes through it too, so it never reveals the address the tunnel hides.": "جستجوی دروازه هم از همین رد می‌شود، پس هیچ‌وقت آدرسی را که تونل پنهان می‌کند لو نمی‌دهد.",
+  "How the gateway is chosen": "روش انتخاب دروازه",
+  "Custom first spends one attempt on your address before searching. Custom only never searches.": "«اول دستی» یک تلاش را صرف آدرس شما می‌کند و بعد جستجو را شروع می‌کند. «فقط دستی» اصلاً جستجو نمی‌کند.",
+  "Address": "آدرس",
+  "HTTP/2 gateway": "دروازهٔ HTTP/2",
+  "Automatic · IP:port": "خودکار · IP:port",
+  "WireGuard endpoint": "نقطهٔ اتصال WireGuard",
+  "Set the system proxy while connected": "تنظیم پروکسی سیستم در زمان اتصال",
+  "Search again when a route drops. Off, a dead session stays dead, which is what you want while testing a network.": "وقتی مسیری قطع شد دوباره جستجو می‌کند. خاموش که باشد، نشست قطع‌شده قطع می‌ماند — که موقع تست یک شبکه همان را می‌خواهید.",
+  "Applications fail rather than send traffic in the clear. Until a route comes back or you disconnect, this machine has no working proxy.": "برنامه‌ها به‌جای فرستادن ترافیک بدون رمز، خطا می‌دهند. تا وقتی مسیری برنگردد یا خودتان قطع نکنید، این دستگاه پروکسی سالمی ندارد.",
+  "Proxy address": "آدرس پروکسی",
+  "Where the SOCKS5 listener binds.": "جایی که شنوندهٔ SOCKS5 روی آن بالا می‌آید.",
+  "DNS resolvers": "سرورهای DNS",
+  "One to eight addresses, comma separated.": "یک تا هشت آدرس، جداشده با کاما.",
+  "Full tunnel asks resolvers over DoH, which Cloudflare, Google and Quad9 offer. Other addresses are skipped there; with none left, it uses Cloudflare and Google.":
+    "تونل کامل نام‌ها را از طریق DoH می‌پرسد که Cloudflare و Google و Quad9 آن را دارند. آدرس‌های دیگر در این حالت کنار گذاشته می‌شوند و اگر چیزی نماند، از Cloudflare و Google استفاده می‌شود.",
+  "Iranian sites bypass the tunnel": "سایت‌های ایرانی از تونل خارج شوند",
+  "Filtering only applies to traffic that looks like it left Iran, so these sites gain nothing from the tunnel and only pay for the exit's bandwidth. The list ships with the app and is not fetched.": "فیلترینگ فقط روی ترافیکی اعمال می‌شود که به‌نظر از ایران خارج شده، پس این سایت‌ها از تونل چیزی به دست نمی‌آورند و فقط پهنای باند نود خروج را مصرف می‌کنند. لیست همراه خود برنامه می‌آید و دانلود نمی‌شود.",
+  "Never send": "هرگز فرستاده نشود",
+  "Bypass the tunnel": "خارج از تونل",
+  "Rules file": "فایل قوانین",
+  "Optional absolute path": "مسیر کامل، اختیاری",
+  "Read in addition to the rules above.": "علاوه بر قوانین بالا خوانده می‌شود.",
+  "Share this connection on my network": "اشتراک این اتصال روی شبکهٔ من",
+  "Port": "پورت",
+  "Typed into the other device.": "همین را در دستگاه دیگر وارد می‌کنید.",
+  "Username": "نام کاربری",
+  "Optional.": "اختیاری.",
+  "Password": "رمز عبور",
+  "Team": "تیم",
+  "team name": "نام تیم",
+  "Email": "ایمیل",
+  "Access client ID": "شناسهٔ کلاینت Access",
+  "Access client secret": "کلید مخفی کلاینت Access",
+  "Existing token": "توکن موجود",
+  "Skips sign-in when you already hold one.": "اگر از قبل توکن دارید، مرحلهٔ ورود رد می‌شود.",
+  "Send web traffic to Gateway": "فرستادن ترافیک وب به Gateway",
+  "Applies the enrolled organisation's policy. Adds a hop, and permits its logging.": "سیاست سازمان ثبت‌شده را اعمال می‌کند. یک پرش اضافه می‌کند و اجازهٔ ثبت وقایع آن را می‌دهد.",
+  "Profile name": "نام پروفایل",
+  "Shown in reports so you can tell saved setups apart.": "در گزارش‌ها نمایش داده می‌شود تا تنظیمات ذخیره‌شده را از هم تشخیص دهید.",
+  "Core executable": "فایل اجرایی هسته",
+  "Auto-detect": "تشخیص خودکار",
+  "Log detail": "جزئیات لاگ",
+  "Connection state is read from info-level output, so info is the floor.": "وضعیت اتصال از خروجی سطح info خوانده می‌شود، پس info کف مجاز است.",
+  "App and engine version": "نسخهٔ برنامه و موتور",
+  "Always included — a report without it cannot be read.": "همیشه هست — گزارشی بدون آن قابل خواندن نیست.",
+  "Operating system": "سیستم‌عامل",
+  "Connection settings": "تنظیمات اتصال",
+  "No Zero Trust credentials and no pinned address — only whether one is set.": "بدون اطلاعات ورود Zero Trust و بدون آدرس ثابت‌شده — فقط اینکه تنظیم شده یا نه.",
+  "What the core and the supervisor did.": "کاری که هسته و ناظر انجام داده‌اند.",
+  "Replace IP addresses": "جایگزینی آدرس‌های IP",
+  "Swaps them for placeholders. Most problems can still be diagnosed.": "آن‌ها را با جای‌نگهدار عوض می‌کند. بیشتر مشکلات هنوز قابل تشخیص می‌مانند.",
+  "both": "هر دو",
+  "auto": "خودکار",
+  "low": "کم",
+  "medium": "متوسط",
+  "high": "زیاد",
+  "off": "خاموش",
+  "light": "سبک",
+  "firewall": "فایروال",
+  "gfw": "GFW",
+  "aggressive": "تهاجمی",
+  "error": "خطا",
+  "warn": "هشدار",
+  "info": "اطلاعات",
+  "debug": "اشکال‌زدایی",
+  "trace": "ردیابی",
+  "Route through a second hop": "عبور از یک پرش دوم",
+  "Every node is dialled from inside the tunnel, so this network only ever sees Cloudflare.": "هر نود از داخل تونل شماره‌گیری می‌شود، پس این شبکه فقط کلادفلر را می‌بیند.",
+  "Dial nodes through the tunnel": "شماره‌گیری نودها از داخل تونل",
+  "Round-trip through the tunnel over the last eighty seconds": "زمان رفت و برگشت از تونل در هشتاد ثانیهٔ اخیر",
+
+  // -- the way out: which carrier runs, and where it comes out -----------
+  // "حامل" for carrier reads as freight rather than as a route, so the heading
+  // asks the question the screen actually answers instead of naming a concept
+  // the user has no reason to hold.
+  "Way out": "راه خروج",
+  "What carries your traffic off this network. Add a second hop to change where it comes out.":
+    "چه چیزی ترافیک شما را از این شبکه بیرون می‌برد. برای عوض کردن محل خروج، یک پرش دوم اضافه کنید.",
+  // The two pickers are one sentence broken in half, so the halves have to
+  // read as a sentence in Persian too rather than as two labels.
+  "Find the way out for me": "راه خروج را برایم پیدا کن",
+  "Connect tries every way out at once and keeps the first that carries traffic. Off, it uses the one chosen below.":
+    "اتصال همهٔ راه‌های خروج را هم‌زمان امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. خاموش که باشد، از همانی که پایین انتخاب شده استفاده می‌کند.",
+  "Used when the search finds nothing": "وقتی جستجو چیزی پیدا نکند، از این استفاده می‌شود",
+  "Leaves this network through": "خروج از این شبکه با",
+  "Then out through": "و سپس خروج از",
+  "Nothing further": "هیچ‌چیز دیگر",
+  "One hop. Traffic comes out wherever the carrier above puts it.":
+    "یک پرش. ترافیک همان‌جایی بیرون می‌آید که کریر بالا می‌گذارد.",
+  // Reached through AS_EXIT and EXIT_NOTE rather than as literals, so the
+  // check that scans for literal t() arguments cannot see them. Translated
+  // here on purpose: without these lines the whole panel falls back to English.
+  "Needs an Aether identity already on this machine — it cannot register a new one through another carrier.":
+    "به یک شناسهٔ Aether که از قبل روی این دستگاه باشد نیاز دارد — نمی‌تواند از راه کریر دیگری شناسهٔ تازه ثبت کند.",
+  "Can be pinned to a country below. Slower to connect.":
+    "می‌توان کشورش را پایین ثابت کرد. کندتر وصل می‌شود.",
+  "A Tor exit relay, in a country nobody here chooses. No UDP.":
+    "یک بازپخش خروجی تور، در کشوری که هیچ‌کس اینجا انتخابش نمی‌کند. UDP ندارد.",
+  "Comes out on Cloudflare's network, close to you. This does not change your country.":
+    "روی شبکهٔ کلادفلر، نزدیک خودتان بیرون می‌آید. این کشور شما را عوض نمی‌کند.",
+  "Comes out wherever Psiphon has capacity, and can be pinned to a country below.":
+    "هرجا که سایفون ظرفیت داشته باشد بیرون می‌آید، و می‌توان کشورش را پایین ثابت کرد.",
+  "Comes out at a Tor exit relay.": "در یک بازپخش خروجی تور بیرون می‌آید.",
+  "Aether cannot register a new device through another carrier, so this ordering only works if Aether has connected on this machine before. It also comes out near you rather than abroad.":
+    "Aether نمی‌تواند از راه کریر دیگری دستگاه تازه ثبت کند؛ پس این ترتیب فقط وقتی کار می‌کند که Aether پیش‌تر روی این دستگاه وصل شده باشد. خروجش هم نزدیک خودتان است، نه خارج.",
+  "No UDP through this chain: QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.":
+    "این زنجیره UDP را عبور نمی‌دهد: QUIC و DNS ساده رد می‌شوند تا معلق نمانند. صفحه‌ها باز می‌شوند و نام‌ها هم ترجمه می‌شوند.",
+  "Cloudflare's network. Fast, and exits near you — it does not change your country.":
+    "شبکهٔ کلادفلر. سریع است و نزدیک خودتان خارج می‌شود — کشور شما را عوض نمی‌کند.",
+  "Psiphon": "سایفون",
+  "Finds its own way out and can exit from another country. Slower to connect.":
+    "خودش راه خروج را پیدا می‌کند و می‌تواند از کشوری دیگر خارج شود. کندتر وصل می‌شود.",
+  "Exit country": "کشور خروج",
+  "A preference, not a guarantee. Psiphon keeps trying rather than substituting, so a country with no capacity is a slow connect.":
+    "یک ترجیح است، نه تضمین. سایفون به‌جای جایگزینی، تلاش را ادامه می‌دهد؛ پس کشوری که ظرفیت ندارد یعنی اتصال کند.",
+  "Best available": "بهترین گزینهٔ موجود",
+  "Moving the exit. This reconnects, so it takes as long as connecting does.":
+    "در حال جابه‌جایی خروج. این کار دوباره وصل می‌شود، پس به اندازهٔ یک اتصال طول می‌کشد.",
+  "The country list is Psiphon's own and arrives once you have connected at least once.":
+    "فهرست کشورها را خود سایفون می‌دهد و پس از نخستین اتصال می‌رسد.",
+  "The transport, search and anti-blocking settings belong to the Aether engine. Choose Aether above to see them.":
+    "تنظیمات ترابرد، جستجو و ضدمسدودسازی به موتور Aether مربوط‌اند. برای دیدنشان بالا Aether را انتخاب کنید.",
+  "The first connect on a hard network can take several minutes: Psiphon has to fetch its own settings before it can use the routes that work there. Later connects are much faster.":
+    "اولین اتصال روی یک شبکهٔ سخت می‌تواند چند دقیقه طول بکشد: سایفون باید اول تنظیمات خودش را بگیرد تا بتواند از مسیرهایی که آنجا کار می‌کنند استفاده کند. اتصال‌های بعدی خیلی سریع‌ترند.",
+  "Under Psiphon the endpoint scanner, the pinned endpoint and the transport choice do nothing — Psiphon finds its own route.":
+    "زیر سایفون، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — سایفون مسیر خودش را پیدا می‌کند.",
+
+  // -- Tor, and its bridges ----------------------------------------------
+  // "پل" is the settled Persian word for a Tor bridge and is what the Tor
+  // Project's own Persian pages use, so it is what someone who has read them
+  // will be looking for here.
+  "Tor": "تور",
+  "Three relays. The strongest against being identified, and the slowest. No UDP.":
+    "سه بازپخش. قوی‌ترین گزینه در برابر شناسایی، و کندترین. UDP ندارد.",
+  // -- the search that tries every way out ------------------------------
+  "Not sure which one works?": "نمی‌دانید کدام کار می‌کند؟",
+  "Find one that works": "یکی که کار می‌کند را پیدا کن",
+  "Stop searching": "توقف جستجو",
+  "Tries each way out in turn and keeps the first that carries traffic. Singles first, pairs only if none of them get out.":
+    "هر راه خروج را به‌ترتیب امتحان می‌کند و اولی که ترافیک حمل کند نگه می‌دارد. اول تک‌ها، و جفت‌ها فقط اگر هیچ‌کدام بیرون نرفت.",
+  "each carrier is given the time it needs. Stopping takes effect after the current attempt.":
+    "به هر حامل همان‌قدر که لازم دارد وقت داده می‌شود. توقف بعد از تلاش فعلی اعمال می‌شود.",
+  "Worst case": "بدترین حالت",
+  "minutes, if nothing gets out at all — and seconds when the first one does.":
+    "دقیقه، اگر هیچ راهی بیرون نرود — و چند ثانیه، وقتی اولی جواب بدهد.",
+  "carrying traffic": "در حال حمل ترافیک",
+  "still running when another answered": "وقتی راه دیگری جواب داد، هنوز در حال اجرا بود",
+  "did not connect within its own deadline": "در مهلت خودش وصل نشد",
+  "connected, but nothing proved who it was through it":
+    "وصل شد، ولی هیچ میزبانی از داخلش هویتش را ثابت نکرد",
+  "stopped without saying why": "بدون گفتن دلیل متوقف شد",
+  "the search was stopped": "جستجو متوقف شد",
+  "Nothing got out. Every way out was tried; the list above says how each one failed.":
+    "هیچ‌چیز بیرون نرفت. همهٔ راه‌های خروج امتحان شد؛ فهرست بالا می‌گوید هرکدام چطور شکست خورد.",
+
+  "Bridges": "پل‌ها",
+  "Bridges are not used when Tor is the second hop: the carrier in front is what got out of this network, so Tor takes the direct relays.":
+    "وقتی تور هپ دوم است پل‌ها استفاده نمی‌شوند: کریر جلویی همان چیزی است که از این شبکه بیرون رفته، پس تور از بازپخش‌های مستقیم استفاده می‌کند.",
+  "Only needed where Tor itself is blocked. Off is faster and works on an ordinary network.":
+    "فقط جایی لازم است که خود تور مسدود باشد. خاموش سریع‌تر است و روی شبکهٔ معمولی کار می‌کند.",
+  "Off": "خاموش",
+  "Built-in": "همراه برنامه",
+  "Pasted": "چسبانده‌شده",
+  "Bridge transport": "ترابرد پل",
+  "Tor ships these bridges itself, so they are as current as this build. They are also public, which is what a censor blocks first.":
+    "این پل‌ها را خود تور می‌دهد، پس به اندازهٔ همین نسخه به‌روزند. عمومی هم هستند، و سانسورچی اول همین‌ها را می‌بندد.",
+  "Bridge lines": "خط‌های پل",
+  "One per line, from bridges.torproject.org or someone who has one. A leading “Bridge” is fine — it is stripped.":
+    "هر خط یکی، از bridges.torproject.org یا از کسی که دارد. اگر اول خط «Bridge» باشد اشکالی ندارد — حذف می‌شود.",
+  "Tor carries no UDP, so QUIC and plain DNS are refused rather than left to hang. Pages still load and names still resolve.":
+    "تور UDP را حمل نمی‌کند، پس QUIC و DNS ساده رد می‌شوند تا معلق نمانند. صفحه‌ها باز می‌شوند و نام‌ها همچنان ترجمه می‌شوند.",
+  "Ask Tor for bridges": "از تور پل بگیر",
+  "The country you are connecting from, not the one you want to appear in. Sent through your current connection, because this service is itself blocked in most places it is needed.":
+    "کشوری که از آن وصل می‌شوید، نه کشوری که می‌خواهید از آن دیده شوید. از راه اتصال فعلی فرستاده می‌شود، چون خود این سرویس در بیشتر جاهایی که لازم است مسدود است.",
+  "Country you are connecting from": "کشوری که از آن وصل می‌شوید",
+  "Asking…": "در حال پرسیدن…",
+  "Fetch": "دریافت پل",
+  "Under Tor the endpoint scanner, the pinned endpoint and the transport choice do nothing — Tor picks its own relays.":
+    "زیر تور، پویشگر نقطهٔ پایانی، نقطهٔ پایانی ثابت‌شده و انتخاب ترابرد هیچ کاری نمی‌کنند — تور بازپخش‌های خودش را انتخاب می‌کند.",
+
+  // -- section headings, buttons and the paragraphs between them ---------
+  // Reached through the primitives in panels.tsx rather than by a call at each
+  // use site, so a control added later is translated by construction.
+  "Retries alternate the two MASQUE transports automatically.": "تلاش‌های بعدی خودکار بین دو پروتکل MASQUE جابه‌جا می‌شوند.",
+  "Search": "جستجو",
+  "Anti-blocking": "ضد مسدودسازی",
+  "Both cost a little on a healthy network and only matter on a filtered one.": "هر دو روی شبکهٔ سالم کمی هزینه دارند و فقط روی شبکهٔ فیلترشده به کار می‌آیند.",
+  "Defeats filtering that reads only the first packet.": "فیلترینگی را که فقط بستهٔ اول را می‌خواند دور می‌زند.",
+  "Pinned endpoint": "دروازهٔ ثابت‌شده",
+  "One attempt goes here; if it fails the core searches instead and says so.": "یک تلاش به این آدرس می‌رود؛ اگر شکست بخورد، هسته جستجو را شروع می‌کند و همین را می‌گوید.",
+  "Every attempt goes here. Nothing else is tried.": "همهٔ تلاش‌ها به این آدرس می‌روند. هیچ چیز دیگری امتحان نمی‌شود.",
+  "A saved address is kept but not used while this is Automatic.": "آدرس ذخیره‌شده نگه داشته می‌شود ولی تا وقتی این گزینه روی خودکار است، استفاده نمی‌شود.",
+  "Per-protocol overrides": "تنظیم جداگانه برای هر پروتکل",
+  "Left empty, each protocol uses the pinned endpoint above or its own search.": "اگر خالی بماند، هر پروتکل از دروازهٔ ثابت بالا یا جستجوی خودش استفاده می‌کند.",
+  "Reach": "دامنهٔ پوشش",
+  "Local proxy and DNS": "پروکسی محلی و DNS",
+  "Routing rules": "قوانین مسیریابی",
+  "Blocked first, then direct; everything left over enters the tunnel. One rule per line.": "اول مسدودها، بعد مستقیم‌ها؛ هر چه بماند وارد تونل می‌شود. هر خط یک قانون.",
+  "Share with other devices": "اشتراک با دستگاه‌های دیگر",
+  "The port is opened while connected and closed when you disconnect.": "پورت در زمان اتصال باز می‌شود و با قطع اتصال بسته می‌شود.",
+  "Connect first — there is nothing to share until the tunnel is carrying traffic.": "اول وصل شوید — تا وقتی تونل ترافیکی حمل نکند، چیزی برای اشتراک نیست.",
+  "No sign-in: anyone on this network can use your tunnel": "بدون ورود: هر کسی روی این شبکه می‌تواند از تونل شما استفاده کند",
+  "Open": "باز",
+  "Not open": "بسته",
+  "Apply to open the port.": "برای باز کردن پورت، «اعمال» را بزنید.",
+  "Apply": "اعمال",
+  "Sets the operating system's proxy settings.": "تنظیمات پروکسی سیستم‌عامل را اعمال می‌کند.",
+  "Leave empty to stay on a personal WARP identity.": "خالی بگذارید تا روی شناسهٔ شخصی WARP بمانید.",
+  "Core and profile": "هسته و پروفایل",
+  "Save profile": "ذخیرهٔ پروفایل",
+  "Report": "گزارش",
+  "Raise the log detail, reproduce the problem, then build this.": "جزئیات لاگ را بالا ببرید، مشکل را دوباره ایجاد کنید، بعد این را بسازید.",
+  "Copy": "کپی",
+  "Save report": "ذخیرهٔ گزارش",
+  "Change the address you appear from": "تغییر آدرسی که از آن دیده می‌شوید",
+  "This network sees only Cloudflare, never your node's address. Needs the tunnel connected.": "این شبکه فقط کلادفلر را می‌بیند، هرگز آدرس نود شما را. نیاز دارد که تونل وصل باشد.",
+  "Starting…": "در حال راه‌اندازی…",
+  "Switched on, but not running.": "روشن است، ولی در حال اجرا نیست.",
+  "Waiting for the tunnel. Turn off the switch above to run without it.": "منتظر تونل. برای اجرا بدون آن، کلید بالا را خاموش کنید.",
+  "Start now": "همین حالا شروع کن",
+  "The chain did not start": "زنجیره شروع نشد",
+  "Configs pasted by hand": "کانفیگ‌های دستی",
+  "Read when the chain starts, so they take effect once applied.": "موقع شروع زنجیره خوانده می‌شوند، پس بعد از اعمال کردن اثر می‌گذارند.",
+  "Turn on “Route through a second hop” above to load nodes.": "برای بارگذاری نودها، «عبور از یک پرش دوم» را در بالا روشن کنید.",
+  "Connect first, or turn off “Dial nodes through the tunnel”.": "اول وصل شوید، یا «شماره‌گیری نودها از داخل تونل» را خاموش کنید.",
+  "The chain did not start. The reason is shown above.": "زنجیره شروع نشد. دلیلش در بالا نوشته شده.",
+  "Subscriptions": "اشتراک‌ها",
+  "No subscriptions yet.": "هنوز اشتراکی اضافه نشده.",
+  "Add a subscription": "افزودن اشتراک",
+  "Add": "افزودن",
+  "Nodes": "نودها",
+  "Refresh": "به‌روزرسانی",
+  "Test": "تست",
+  "In use": "در حال استفاده",
+  "Use": "استفاده",
+  "Enter opens · ↑↓ moves · Esc closes": "Enter باز می‌کند · ↑↓ جابه‌جا می‌شود · Esc می‌بندد",
+  "Nothing answered on either transport. This network is filtering hard.": "هیچ‌کدام از دو پروتکل جوابی نداد. این شبکه سخت‌گیرانه فیلتر می‌کند.",
+  "Enter a numeric address and port first.": "اول یک آدرس عددی و پورت وارد کنید.",
+  "Find a gateway": "پیدا کردن دروازه",
+  "Working": "در حال کار",
+  "What will run": "چه چیزی اجرا می‌شود",
+  "No events yet. Connect to populate this.": "هنوز رویدادی نیست. برای پر شدن، وصل شوید.",
+  "What this is built on": "این برنامه بر چه چیزی ساخته شده",
+  "Full notices": "متن کامل مجوزها",
+  "Idle": "بی‌کار",
+  "Live": "فعال",
+  "Scan cancelled.": "جستجو لغو شد.",
+  "Sets the WinINET proxy. Most apps follow it; some bring their own settings.": "پروکسی WinINET را تنظیم می‌کند. بیشتر برنامه‌ها از آن پیروی می‌کنند؛ بعضی تنظیمات خودشان را دارند.",
+  "Sets the SOCKS proxy on every active network service.": "پروکسی SOCKS را روی هر سرویس شبکهٔ فعال تنظیم می‌کند.",
+  "Sets the GNOME proxy. Desktops that ignore gsettings are unaffected.": "پروکسی GNOME را تنظیم می‌کند. میزکارهایی که gsettings را نادیده می‌گیرند تحت تأثیر قرار نمی‌گیرند.",
+  "TCP. Survives networks that block UDP.": "TCP. از شبکه‌هایی که UDP را مسدود می‌کنند عبور می‌کند.",
+  "QUIC. Lower overhead where UDP gets through.": "QUIC. جایی که UDP رد می‌شود، سربار کمتری دارد.",
+  "UDP, with an obfuscation profile sweep.": "UDP، همراه با جستجو در پروفایل‌های مبهم‌سازی.",
+  "Nested tunnel. Slower, harder to classify.": "تونل تودرتو. کندتر، ولی سخت‌تر قابل تشخیص.",
+  "Connection": "اتصال",
+  "Status": "وضعیت",
+  "Routes & transports": "مسیرها و پروتکل‌ها",
+  "Endpoint": "دروازه",
+  "Exit chain": "زنجیرهٔ خروج",
+  "System": "سیستم",
+  "Traffic & DNS": "ترافیک و DNS",
+  "Identity": "شناسه",
+  "Support": "پشتیبانی",
+  "Diagnostics": "عیب‌یابی",
+  "Licences & notices": "مجوزها و اعلان‌ها",
+  "What the core is doing right now.": "کاری که هسته همین الان انجام می‌دهد.",
+  "How hard to search, what the tunnel rides on, and how it hides.": "چقدر سخت جستجو شود، تونل روی چه چیزی سوار شود، و چطور خودش را پنهان کند.",
+  "Pin a specific gateway, or let the core find one.": "یک دروازهٔ مشخص را ثابت کنید، یا بگذارید هسته خودش پیدا کند.",
+  "Send the tunnel's traffic on through a node of your own, so the address you appear from changes.": "ترافیک تونل را از یک نود متعلق به خودتان رد کنید، تا آدرسی که از آن دیده می‌شوید عوض شود.",
+  "Where traffic goes once the tunnel is up.": "ترافیک بعد از بالا آمدن تونل کجا می‌رود.",
+  "Cloudflare Zero Trust enrolment, and a backup of this device's identity.":
+    "ثبت‌نام در Cloudflare Zero Trust، و پشتیبانی از شناسهٔ این دستگاه.",
+  "Back up your identity": "از شناسهٔ خود پشتیبان بگیرید",
+  "Uninstalling deletes it, and a new one is not always free to get.":
+    "حذف برنامه آن را پاک می‌کند، و گرفتن شناسهٔ تازه همیشه رایگان نیست.",
+  "Cloudflare limits how many identities one network can register. Reinstalling throws yours away, and after a few times it can refuse to issue another — which looks exactly like the app being broken. A backup skips all of that.":
+    "کلادفلر محدود می‌کند که یک شبکه چند شناسه بتواند ثبت کند. نصب دوباره شناسهٔ شما را دور می‌ریزد، و بعد از چند بار ممکن است دیگر شناسه‌ای ندهد — که دقیقاً شبیه خراب بودن برنامه به نظر می‌رسد. یک پشتیبان همهٔ این‌ها را کنار می‌زند.",
+  "Save a backup": "ذخیرهٔ پشتیبان",
+  "Write this device's identity to a file you keep": "شناسهٔ این دستگاه را در فایلی بنویس که خودتان نگه می‌دارید",
+  "Restore from a backup": "بازیابی از پشتیبان",
+  "Use an identity saved from this or another device": "از شناسه‌ای استفاده کن که از همین دستگاه یا دستگاه دیگری ذخیره شده",
+  "Treat the file like a password: anyone who has it can present as this device. It is not encrypted, so keep it somewhere you would keep a password, and do not send it over a channel you would not send one.":
+    "با این فایل مثل یک رمز عبور رفتار کنید: هر کس آن را داشته باشد می‌تواند خودش را این دستگاه جا بزند. رمزگذاری نشده است، پس جایی نگهش دارید که یک رمز را نگه می‌دارید، و از راهی نفرستیدش که یک رمز را نمی‌فرستید.",
+  "Identity saved. Keep it somewhere safe.": "شناسه ذخیره شد. جای امنی نگهش دارید.",
+  "Identity imported. Connect to use it.": "شناسه وارد شد. برای استفاده وصل شوید.",
+  "That did not work": "این کار نکرد",
+  "Disconnect before importing an identity": "پیش از وارد کردن شناسه، اتصال را قطع کنید",
+  "There is no identity to export yet": "هنوز شناسه‌ای برای ذخیره نیست",
+  "The core executable, logging, and a report you can hand to someone.": "فایل اجرایی هسته، ثبت وقایع، و گزارشی که می‌توانید به کسی بدهید.",
+  "What WhiteAesther is built on, under what terms, and where to get the source.": "وایت‌آستر بر چه چیزی ساخته شده، تحت چه شرایطی، و کد منبع از کجا گرفته می‌شود.",
+
+  // -- labels the settings search shows and matches on ----------------------
+  "Live event log": "لاگ زندهٔ رویدادها",
+  "Round-trip chart": "نمودار رفت و برگشت",
+  "Timeouts": "مهلت‌ها",
+  "Endpoint scanner": "جستجوگر دروازه",
+  "Local proxy address": "آدرس پروکسی محلی",
+  "Where the source lives": "کد منبع کجاست",
+
+  "Missing": "پیدا نشد",
+  "Put back on disconnect. If the app is killed rather than closed, the next launch restores it.": "با قطع اتصال به حالت قبل برمی‌گردد. اگر برنامه به‌جای بسته شدن کشته شود، اجرای بعدی آن را برمی‌گرداند.",
+  "Tests real MASQUE gateways over": "دروازه‌های واقعی MASQUE را روی",
+  "and ranks them by round-trip time. Nothing is connected until you pick one.": "تست می‌کند و بر اساس زمان رفت و برگشت رتبه‌بندی می‌کند. تا وقتی یکی را انتخاب نکنید، هیچ اتصالی برقرار نمی‌شود.",
+  "Recent events (up to": "رویدادهای اخیر (حداکثر",
+  "Scan": "جستجو کن",
+  "Test pinned": "تست آدرس ثابت",
+  "Automatic": "خودکار",
+  "Custom first": "اول دستی",
+  "Custom only": "فقط دستی",
+  // -- the long paragraphs -------------------------------------------------
+  // Reached through the primitives in panels.tsx rather than by a call at each
+  // use site, so a control added later is translated by construction.
+  "Opens a proxy on this machine that phones, televisions and anything else on the same network can point at. They go out through whatever is carrying traffic here — the second hop when one is running, the tunnel when it is not.": "روی این دستگاه یک پروکسی باز می‌کند که گوشی، تلویزیون و هر چیز دیگری روی همین شبکه می‌تواند به آن وصل شود. آن‌ها از همان مسیری خارج می‌شوند که ترافیک اینجا از آن می‌رود — پرش دوم اگر در حال اجرا باشد، و خود تونل اگر نباشد.",
+  "The client secret and the token are held in memory and passed to the core through its environment. Neither is written to the profile on disk, and neither appears in a diagnostics report. The team, client ID and email are saved with the profile on this device.": "کلید مخفی کلاینت و توکن فقط در حافظه نگه داشته می‌شوند و از طریق متغیرهای محیطی به هسته داده می‌شوند. هیچ‌کدام روی دیسک در پروفایل نوشته نمی‌شوند و هیچ‌کدام در گزارش عیب‌یابی نمی‌آیند. نام تیم، شناسهٔ کلاینت و ایمیل همراه پروفایل روی این دستگاه ذخیره می‌شوند.",
+  "The tunnel hides your traffic but keeps your country — Cloudflare places you near where you already are. Sending it on through a node of your own is what changes that.": "تونل ترافیک شما را پنهان می‌کند ولی کشورتان را نگه می‌دارد — کلادفلر شما را نزدیک همان جایی می‌گذارد که هستید. فرستادن ترافیک از یک نود متعلق به خودتان، همان چیزی است که این را عوض می‌کند.",
+  "One per line. vless, vmess, trojan, ss, hysteria2 and tuic are all understood as they are — nothing needs converting first.": "هر خط یکی. vless و vmess و trojan و ss و hysteria2 و tuic همگی به همان شکلی که هستند خوانده می‌شوند — لازم نیست چیزی را اول تبدیل کنید.",
+  "Kept up to date automatically. A subscription link is a credential — anyone holding it can use your nodes.": "خودکار به‌روز نگه داشته می‌شود. لینک اشتراک یک اطلاعات محرمانه است — هر کسی که آن را داشته باشد می‌تواند از نودهای شما استفاده کند.",
+  "Every measurement here travels the tunnel, so a figure means the node works from behind it — and a failure means it does not. A node marked in amber is not broken and was not measured: hover it to read why this build cannot use it, and what to change.": "هر اندازه‌گیری اینجا از داخل تونل انجام می‌شود، پس یک عدد یعنی نود از پشت تونل کار می‌کند — و شکست یعنی کار نمی‌کند. نودی که زرد علامت خورده خراب نیست و اصلاً اندازه‌گیری نشده: نشانگر را رویش نگه دارید تا بخوانید چرا این نسخه نمی‌تواند از آن استفاده کند و چه چیزی باید عوض شود.",
+  "The core is launched with these arguments. Zero Trust secrets go through the environment and are not shown here.": "هسته با این آرگومان‌ها اجرا می‌شود. اطلاعات محرمانهٔ Zero Trust از طریق متغیرهای محیطی می‌روند و اینجا نمایش داده نمی‌شوند.",
+
+  // -- the command palette ---------------------------------------------------
+  "Search settings — try dns, kill switch, scan…":
+    "جستجوی تنظیمات — مثلاً dns یا kill switch یا scan…",
+  "Nothing matches": "چیزی پیدا نشد",
+};
+
+const DICTIONARIES: Record<Language, Record<string, string>> = { en: {}, fa: FA };
+
+/**
+ * The English sentence, or its translation when one exists.
+ *
+ * An untranslated key returns itself, so a gap reads as English rather than as
+ * a broken label.
+ */
+export function translate(language: Language, key: string): string {
+  const value = DICTIONARIES[language][key];
+  return value === undefined ? key : value;
+}
+
+/** Every key that has been given a Persian translation. */
+export function translatedKeys(): string[] {
+  return Object.keys(FA);
+}
+
+// ------------------------------------------------------- the live preference
+
+function load(): Language {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (stored === "fa" || stored === "en") return stored;
+    // Nothing chosen yet: follow the machine. Someone whose computer is already
+    // in Persian should not have to find a menu to be spoken to in Persian.
+    return window.navigator.language?.toLowerCase().startsWith("fa") ? "fa" : "en";
+  } catch {
+    return "en";
+  }
+}
+
+let current: Language = typeof window === "undefined" ? "en" : load();
+const listeners = new Set<() => void>();
+
+export function getLanguage(): Language {
+  return current;
+}
+
+/** Applies the language to the document, so CSS and the browser agree with us. */
+export function applyLanguage(language: Language): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.lang = language;
+  document.documentElement.dir = DIRECTION[language];
+}
+
+export function setLanguage(next: Language): void {
+  if (next === current) return;
+  current = next;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, next);
+  } catch {
+    // A preference that cannot be stored still applies to this session.
+  }
+  applyLanguage(next);
+  for (const listener of listeners) listener();
+}
+
+export function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}

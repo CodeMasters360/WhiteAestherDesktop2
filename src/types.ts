@@ -1,0 +1,466 @@
+export type ViewId = "overview" | "lab" | "discovery" | "transports" | "routing" | "identity" | "diagnostics" | "preferences";
+export type ConnectionPhase = "h2" | "h3" | "wg";
+export type CoreState = "idle" | "starting" | "scanning" | "connecting" | "connected" | "reconnecting" | "stopped" | "error";
+export type EndpointMode = "automatic" | "custom-first" | "custom-only";
+
+export const ENDPOINT_MODES: Array<{ id: EndpointMode; label: string; detail: string }> = [
+  { id: "automatic", label: "Automatic", detail: "Let the core find a working edge." },
+  { id: "custom-first", label: "Custom first", detail: "Try the pinned address once, then search." },
+  { id: "custom-only", label: "Custom only", detail: "Use the pinned address or fail." },
+];
+
+/**
+ * What gets us out of the network.
+ *
+ * Each one ends in a SOCKS5 listener on loopback that mihomo routes the
+ * interface into. The strings are a stored format — they are what the backend
+ * serialises into the saved profile.
+ */
+export type CarrierKind = "aether" | "psiphon" | "tor" | "worker";
+
+/**
+ * An ordered pair of carriers.
+ *
+ * `first` leaves the local network; `second` decides the exit address.
+ * `second: null` is the single-carrier case — every session before chaining,
+ * and still the default.
+ */
+export interface CarrierChain {
+  first: CarrierKind;
+  second: CarrierKind | null;
+}
+
+/** What to call a chain on screen: the order traffic travels. */
+export function carrierChainLabel(chain: CarrierChain, name: (kind: CarrierKind) => string): string {
+  return chain.second ? `${name(chain.first)} → ${name(chain.second)}` : name(chain.first);
+}
+
+/** The hop that decides the exit address, and whose listener is dialled. */
+export function carrierChainLast(chain: CarrierChain): CarrierKind {
+  return chain.second ?? chain.first;
+}
+
+/**
+ * Whether a carrier appears anywhere in the chain.
+ *
+ * Settings belong to a carrier rather than to a position: an exit country is
+ * Psiphon's whether Psiphon is the first hop or the second.
+ */
+export function carrierChainHas(chain: CarrierChain, kind: CarrierKind): boolean {
+  return chain.first === kind || chain.second === kind;
+}
+
+/** The Aether engine on its own — the only case its own settings apply to. */
+export function isLoneAether(chain: CarrierChain): boolean {
+  return chain.first === "aether" && chain.second === null;
+}
+
+export interface PsiphonSettings {
+  /**
+   * A two-letter country to exit from, or empty for whichever Psiphon
+   * considers best.
+   *
+   * A preference and not a guarantee: Psiphon treats an unreachable region as
+   * a reason to keep trying rather than to substitute, so a country with no
+   * capacity is a slow connect rather than a different exit than the one asked
+   * for.
+   */
+  egressRegion: string;
+}
+
+/**
+ * Which bridges Tor should use, if any.
+ *
+ * "built-in" is Tor's own list, shipped inside the expert bundle beside the
+ * binary — not a list of ours, which would rot between releases.
+ */
+export type BridgeMode = "none" | "built-in" | "custom";
+
+export type WorkerMode = "NORMAL" | "FRAGMENT" | "BROWSER";
+
+export interface WorkerFragment {
+  packets: string;
+  lengths: string;
+  delays: string;
+  maxSplit: string;
+}
+
+/** Connection settings for one deployment; validated again by the backend. */
+export interface WorkerOptions {
+  mode: WorkerMode;
+  cleanAddresses: string[];
+  ports: number[];
+  fingerprint: string;
+  remoteDns: string;
+  ech: boolean;
+  echDns: string;
+  customCdn: boolean;
+  cdnAddresses: string[];
+  cdnHost: string;
+  cdnSni: string;
+  fragments: WorkerFragment[];
+  upstreamProxy: string;
+  proxyIps: string[];
+  fallbackUrl: string;
+  tcpFastOpen: boolean;
+  probeInterval: number;
+}
+
+/** A deployment as the backend shows it: its connection identity stays in the backend. */
+export interface WorkerDeployment {
+  key: string;
+  accountId: string;
+  name: string;
+  pages: boolean;
+  host: string;
+  relay: string;
+  created: boolean;
+  ready: boolean;
+  options: WorkerOptions;
+  customDomain: string;
+  domainPending: boolean;
+}
+
+export interface WorkerAccount {
+  id: string;
+  name: string;
+}
+
+export interface WorkerSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  socksPort: number | null;
+  deployment: string | null;
+  lastError: string | null;
+}
+
+export interface TorSettings {
+  bridges: BridgeMode;
+  /** Which transport to take from the built-in list. */
+  transport: string;
+  /** Bridge lines pasted by hand, one per line. */
+  customBridges: string;
+}
+
+/** What Tor is doing, as the backend reports it. */
+export interface TorSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  pid: number | null;
+  socksPort: number | null;
+  /**
+   * How far bootstrapping has got, 0–100.
+   *
+   * Only 100 counts as connected: Tor binds its SOCKS port long before it has
+   * a circuit, and a listener with nothing behind it accepts connections and
+   * then sits on them.
+   */
+  bootstrap: number;
+  /** What Tor says it is doing, in its own words. */
+  bootstrapSummary: string | null;
+  lastError: string | null;
+}
+
+/** What the Psiphon carrier is doing, as the backend reports it. */
+export interface PsiphonSnapshot {
+  state: "idle" | "connecting" | "connected" | "error";
+  pid: number | null;
+  socksPort: number | null;
+  /** The country the connected server is in, as Psiphon reports it. */
+  exitRegion: string | null;
+  /**
+   * Every country Psiphon last said it had.
+   *
+   * Empty until the first successful connect, because this is Psiphon's own
+   * answer rather than a table of ours — which is honest: we do not know what
+   * it has until it tells us.
+   */
+  availableRegions: string[];
+  lastError: string | null;
+  statusMessage: string | null;
+}
+
+/** A subscription or pasted-config source feeding the chain. */
+export interface ChainSource {
+  name: string;
+  url: string;
+  enabled: boolean;
+}
+
+export interface ChainSettings {
+  enabled: boolean;
+  /**
+   * Dial the nodes from inside the tunnel. On by default — it is what hides the
+   * node's address from the local network — but it makes the chain impossible
+   * whenever the tunnel cannot connect.
+   */
+  throughTunnel: boolean;
+  sources: ChainSource[];
+  /** Config URIs pasted by hand, one per line. mihomo converts these itself. */
+  manual: string;
+  node: string | null;
+}
+
+/** Sharing this machine's tunnel with other devices on the same network. */
+export interface LanSettings {
+  enabled: boolean;
+  /** The port another device is pointed at. */
+  port: number;
+  /**
+   * Both empty means no sign-in at all — anyone who can reach this machine on
+   * the network can use the tunnel. Allowed on purpose; the screen says so.
+   */
+  username: string;
+  password: string;
+}
+
+export interface ConnectionProfile {
+  name: string;
+  protocol: "masque" | "wg" | "gool" | "mim" | "wom";
+  masqueTransport: "h2" | "h3";
+  scanMode: "turbo" | "balanced" | "thorough" | "stealth" | "verified" | "ironclad";
+  ipFamily: "v4" | "v6" | "both";
+  socksAddress: string;
+  quickReconnect: boolean;
+  validateSecs: number;
+  startupSecs: number;
+  reconnectSecs: number;
+  dns: string[];
+  fragmentClientHello: boolean;
+  fragmentSize: string;
+  fragmentDelay: string;
+  helloShape: "" | "records" | "compact";
+  fragmentSni: boolean;
+  recoveryBase?: Pick<ConnectionProfile, "protocol" | "masqueTransport" | "fragmentClientHello" | "helloShape" | "fragmentSize" | "fragmentDelay" | "fragmentSni" | "ech" | "ipFamily" | "scanMode"> | null;
+  masqueSni: string | null;
+  apiHost: string | null;
+  apiSni: string | null;
+  tls13Ciphers: string | null;
+  tlsKeyShares: string | null;
+  tlsSigalgs: string | null;
+  tlsCertCompression: string | null;
+  tlsAlps: string | null;
+  tlsTrustAnchors: string | null;
+  tlsServerPadding: string | null;
+  enableGreaseSigalgs: boolean;
+  enableEchGrease: boolean;
+  disableOcspStapling: boolean;
+  disableSct: boolean;
+  disableSessionTicket: boolean;
+  disableExtensionPermutation: boolean;
+  dataCheck: boolean;
+  h2Peer: string | null;
+  ech: string | null;
+  tlsGroups: string | null;
+  tlsCiphers: string | null;
+  disableGrease: boolean;
+  enrollAddress: string | null;
+  echResolver: string | null;
+  echDomain: string | null;
+  performanceProfile: "auto" | "low" | "medium" | "high";
+  keepaliveSecs: number;
+  noize: "off" | "light" | "firewall" | "balanced" | "gfw" | "aggressive";
+  profileRetry: boolean;
+  logLevel: "error" | "warn" | "info" | "debug" | "trace";
+  /** How `peer` is used. "automatic" ignores it entirely. */
+  endpointMode: EndpointMode;
+  peer: string | null;
+  wgPeer: string | null;
+  corePath: string | null;
+  routeBlock: string;
+  routeDirect: string;
+  routesFile: string | null;
+  /**
+   * Dial out through a proxy already running on this machine.
+   *
+   * `socks5://host:port` or `http://host:port`. Sent to the engine in the
+   * environment, never on the command line: it can carry a password.
+   */
+  upstreamProxy: string;
+  /** Read the host name from the first bytes so domain rules match. On by default. */
+  routeSniff: boolean;
+  /** Register a fresh device when Cloudflare refuses the saved one. On by default. */
+  autoReprovision: boolean;
+  /**
+   * Capture every application through a network device rather than asking them
+   * to follow a proxy. The only way to close a DNS leak, and the only mode
+   * that catches programs which ignore proxy settings entirely.
+   */
+  fullTunnel: boolean;
+  /**
+   * Send Iranian sites straight out instead of through the tunnel.
+   *
+   * Filtering only applies to traffic that looks like it left Iran, so these
+   * sites gain nothing from the tunnel and only pay for the exit's bandwidth.
+   * The lists are bundled with the app, not fetched.
+   */
+  bypassIranSites: boolean;
+  team: string | null;
+  accessClientId: string | null;
+  accessClientSecret: string | null;
+  accessEmail: string | null;
+  accessToken: string | null;
+  gateway: boolean;
+  /** Point the OS proxy at the SOCKS listener while connected. */
+  systemProxy: boolean;
+  /** Keep retrying after a route drops, rather than leaving it dead. */
+  autoReconnect: boolean;
+  /**
+   * Find the way out rather than taking the one in `carriers`.
+   *
+   * On by default, and that is the point. Almost nobody opens Advanced — they
+   * press Connect, and if it does not connect they stop using the app. They do
+   * not go looking for a carrier picker they have never heard of to discover
+   * that Psiphon would have worked. Connect has to be the thing that finds a
+   * way out, not the thing that tries one.
+   */
+  autoRoute: boolean;
+  /**
+   * Which way out of the network to use.
+   *
+   * Everything else in this profile describes the Aether engine and applies
+   * only when the chain ends at "aether". A profile saved before carriers
+   * existed names none, and one saved by 1.8.x carries a bare `carrier` string
+   * the backend migrates into a single-hop chain.
+   */
+  carriers: CarrierChain;
+  /** How the Psiphon carrier runs. Ignored unless `carrier` selects it. */
+  psiphon: PsiphonSettings;
+  /** How the Tor carrier runs. Ignored unless `carrier` selects it. */
+  tor: TorSettings;
+  /** Which Cloudflare Worker deployment to connect through; empty picks the only ready one. */
+  worker: { deployment: string };
+  /** The second hop that changes the exit address. Off unless configured. */
+  chain: ChainSettings;
+  /** Whether other devices on this network may use the tunnel. */
+  lanShare: LanSettings;
+  /** Leave the system proxy on a dead tunnel so apps fail rather than leak. */
+  killSwitch: boolean;
+}
+
+export interface CoreSnapshot {
+  state: CoreState;
+  pid: number | null;
+  corePath: string | null;
+  version: string | null;
+  transport: "masque-h2" | "masque-h3" | "wireguard" | "warp-in-warp" | "masque-in-masque" | "wireguard-over-masque-h2" | "wireguard-over-masque-h3" | null;
+  endpoint: string | null;
+  socksAddress: string;
+  latencyMs: number | null;
+  startedAt: number | null;
+  lastError: string | null;
+  /** What the supervisor is doing right now, including the retry countdown. */
+  statusMessage: string | null;
+  attempt: number;
+  maxAttempts: number;
+  /** The kill switch is holding traffic while the supervisor keeps searching. */
+  blocking: boolean;
+}
+
+export interface CoreLogEvent {
+  timestamp: number;
+  /** "supervisor" is WhiteAesther itself: retries, give-ups, session configuration. */
+  stream: "stdout" | "stderr" | "supervisor";
+  level: "error" | "warn" | "info" | "debug" | "trace";
+  message: string;
+}
+
+export interface CoreProbe {
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  message: string;
+}
+
+export const DEFAULT_PROFILE: ConnectionProfile = {
+  name: "Adaptive · Iran",
+  protocol: "masque",
+  masqueTransport: "h2",
+  scanMode: "balanced",
+  ipFamily: "both",
+  socksAddress: "127.0.0.1:1819",
+  quickReconnect: true,
+  validateSecs: 10,
+  startupSecs: 30,
+  reconnectSecs: 2,
+  dns: ["1.1.1.1", "1.0.0.1"],
+  fragmentClientHello: false,
+  fragmentSize: "16-32",
+  fragmentDelay: "2-10",
+  helloShape: "",
+  fragmentSni: true,
+  recoveryBase: null,
+  masqueSni: null,
+  apiHost: null,
+  apiSni: null,
+  tls13Ciphers: null,
+  tlsKeyShares: null,
+  tlsSigalgs: null,
+  tlsCertCompression: null,
+  tlsAlps: null,
+  tlsTrustAnchors: null,
+  tlsServerPadding: null,
+  enableGreaseSigalgs: false,
+  enableEchGrease: false,
+  disableOcspStapling: false,
+  disableSct: false,
+  disableSessionTicket: false,
+  disableExtensionPermutation: false,
+  dataCheck: true,
+  h2Peer: null,
+  ech: null,
+  tlsGroups: null,
+  tlsCiphers: null,
+  disableGrease: false,
+  enrollAddress: null,
+  echResolver: null,
+  echDomain: null,
+  performanceProfile: "auto",
+  keepaliveSecs: 25,
+  noize: "balanced",
+  profileRetry: true,
+  logLevel: "info",
+  endpointMode: "automatic",
+  peer: null,
+  wgPeer: null,
+  corePath: null,
+  routeBlock: "",
+  routeDirect: "",
+  routesFile: null,
+  upstreamProxy: "",
+  routeSniff: true,
+  autoReprovision: true,
+  fullTunnel: false,
+  bypassIranSites: false,
+  team: null,
+  accessClientId: null,
+  accessClientSecret: null,
+  accessEmail: null,
+  accessToken: null,
+  gateway: false,
+  systemProxy: false,
+  autoReconnect: true,
+  autoRoute: true,
+  carriers: { first: "aether", second: null },
+  psiphon: { egressRegion: "" },
+  tor: { bridges: "none", transport: "obfs4", customBridges: "" },
+  worker: { deployment: "" },
+  chain: { enabled: false, throughTunnel: true, sources: [], manual: "", node: null },
+  lanShare: { enabled: false, port: 1080, username: "", password: "" },
+  killSwitch: false,
+};
+
+export const IDLE_SNAPSHOT: CoreSnapshot = {
+  state: "idle",
+  pid: null,
+  corePath: null,
+  version: null,
+  transport: null,
+  endpoint: null,
+  socksAddress: "127.0.0.1:1819",
+  latencyMs: null,
+  startedAt: null,
+  lastError: null,
+  statusMessage: null,
+  attempt: 0,
+  maxAttempts: 8,
+  blocking: false,
+};

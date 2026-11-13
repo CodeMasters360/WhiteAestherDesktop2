@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Aether is staged per target at build time.
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# UI test output
+test-results/
+playwright-report/
+
+# Isolated, reproducible core builds; committed changes live in patches/aether.
+.core-work/
+.core-reference/
+aether-core/
+aether-source/
+artifacts/restricted-networks/
