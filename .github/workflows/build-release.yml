@@ -120,7 +120,7 @@ jobs:
           c = c.replace(/fetch\((url[^)]*)\)/g, 'fetch($1, { headers: { "User-Agent": "Mozilla/5.0" } })');
           fs.writeFileSync('scripts/stage-tor.mjs', c);
           EOF
-          node patch.js
+          node patch.cjs
 
       - name: Stage Tor and Build
         run: |
