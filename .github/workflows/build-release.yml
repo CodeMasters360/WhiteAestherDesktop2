@@ -22,40 +22,25 @@ jobs:
   gate:
     name: Decide whether this publishes
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
-      prerelease: ${{ steps.decide.outputs.prerelease }}
     steps:
-      - name: Check out upstream WhiteAesther to read version
-        uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAesther
-
+      - uses: actions/checkout@v4
+        with: { repository: WhiteDNS/WhiteAesther }
       - id: decide
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
+        env: { GH_TOKEN: ${{ github.token }} }
         run: |
-          set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          prerelease="$(node -p "require('./package.json').prerelease === true")"
-          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
-          publish=false
           if [[ "${GITHUB_REF}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            publish=true
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            if gh release view "v${version}" >/dev/null 2>&1; then
-              echo "v${version} is already released"
-            else
-              publish=true
-            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]] && ! gh release view "v${version}" >/dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
 
   package:
     name: ${{ matrix.name }}
@@ -71,61 +56,34 @@ jobs:
             artifact: windows-x86_64
             core: aether.exe
             bundles: nsis,msi
-            packages: |
-              src-tauri/target/release/bundle/nsis/*.exe
-              src-tauri/target/release/bundle/msi/*.msi
+            packages: src-tauri/target/release/bundle/nsis/*.exe
           - os: ubuntu-22.04
             name: Linux x86_64
             artifact: linux-x86_64
             core: aether
             bundles: deb,rpm,appimage
-            packages: |
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/rpm/*.rpm
-              src-tauri/target/release/bundle/appimage/*.AppImage
+            packages: src-tauri/target/release/bundle/deb/*.deb
 
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Check out upstream WhiteAesther source
-        uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAesther
+      - uses: actions/checkout@v4
+        with: { repository: WhiteDNS/WhiteAesther }
+      - uses: actions/checkout@v4
+        with: { repository: WhiteDNS/WhiteAestherMobile, ref: ${{ env.AETHER_REVISION }}, path: aether-source }
 
-      - name: Check out the pinned Aether core
-        uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAestherMobile
-          ref: ${{ env.AETHER_REVISION }}
-          path: aether-source
-
-      - name: Apply and verify the desktop core patches
-        run: node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        timeout-minutes: 25
-        run: >-
-          sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
-          libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-          cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils
-          libevent-2.1-7
-
-      - name: Install pnpm and dependencies
-        uses: pnpm/action-setup@v4
+      - name: Build Setup
+        run: |
+          node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
+          if [ "$RUNNER_OS" == "Linux" ]; then sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7; fi
+      
+      - uses: pnpm/action-setup@v4
         with: { version: 10 }
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with: { node-version: 24, cache: pnpm }
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@1.98.0
         with: { components: rustfmt, clippy }
-
-      - name: Install NASM
+      - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
 
       - name: Compile
         run: |
@@ -137,27 +95,25 @@ jobs:
           pnpm stage:psiphon
           pnpm stage:xray
 
-      - name: Patch stage-tor.mjs to bypass Hash Check
+      - name: Patch stage-tor.mjs
         shell: bash
         run: |
-          node -e '
-          const fs = require("fs");
-          let content = fs.readFileSync("scripts/stage-tor.mjs", "utf8");
-          // 1. تغییر نسخه
-          content = content.replace(/const VERSION = "[^"]+";/, `const VERSION = "16.0.1";`);
-          // 2. دور زدن بررسی هش (فقط با true کردن شرط)
-          content = content.replace(/if \(actual !== expected\)/g, "if (false)");
-          // 3. افزودن User-Agent به فچ‌ها
-          content = content.replace(/fetch\((url[^)]*)\)/g, (m, g) => `fetch(${g}, { headers: { "User-Agent": "Mozilla/5.0" } })`);
-          fs.writeFileSync("scripts/stage-tor.mjs", content, "utf8");
-          '
+          cat << 'EOF' > patch-tor.js
+          const fs = require('fs');
+          let content = fs.readFileSync('scripts/stage-tor.mjs', 'utf8');
+          content = content.replace(/const VERSION = "[^"]+"/, 'const VERSION = "16.0.1"');
+          content = content.replace(/if \(actual !== expected\)/g, 'if (false)');
+          content = content.replace(/fetch\((url[^)]*)\)/g, 'fetch($1, { headers: { "User-Agent": "Mozilla/5.0" } })');
+          fs.writeFileSync('scripts/stage-tor.mjs', content);
+          EOF
+          node patch-tor.js
 
-      - name: Stage Tor and Build
+      - name: Stage and Build
         run: |
           pnpm stage:tor
           pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
 
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: whiteaesther-${{ matrix.artifact }}
@@ -170,17 +126,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
-      - name: Download all
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with: { path: release-assets, merge-multiple: true }
-
       - name: Publish
-        shell: bash
         env: { GH_TOKEN: ${{ github.token }} }
         run: |
           tag="v${{ needs.gate.outputs.version }}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --clobber
-          else
-            gh release create "$tag" release-assets/* --title "WhiteAesther $tag" --generate-notes
-          fi
+          gh release upload "$tag" release-assets/* --clobber || \
+          gh release create "$tag" release-assets/* --title "WhiteAesther $tag" --generate-notes
