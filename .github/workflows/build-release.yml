@@ -3,55 +3,19 @@ name: build, test and release
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: read
 
-concurrency:
-  group: whiteaesther-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   AETHER_REVISION: 2409297365e23e3fd320a87c0da73d0656bee67c
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
-  gate:
-    name: Decide whether this publishes
-    runs-on: ubuntu-latest
-    outputs:
-      publish: ${{ steps.decide.outputs.publish }}
-      version: ${{ steps.decide.outputs.version }}
-    steps:
-      - name: Check out upstream
-        uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAesther
-
-      - id: decide
-        name: Determine Version and Publish Status
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]] && ! gh release view "v${version}" >/dev/null 2>&1; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-
   package:
     name: ${{ matrix.name }}
-    needs: gate
-    if: needs.gate.outputs.publish == 'true'
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -73,37 +37,25 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAesther
+        with: { repository: WhiteDNS/WhiteAesther }
       - uses: actions/checkout@v4
-        with:
-          repository: WhiteDNS/WhiteAestherMobile
-          ref: ${{ env.AETHER_REVISION }}
-          path: aether-source
+        with: { repository: WhiteDNS/WhiteAestherMobile, ref: ${{ env.AETHER_REVISION }}, path: aether-source }
 
-      - name: Prepare Core
-        run: node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Prepare and Compile
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7
-      
+          node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
+          if [ "$RUNNER_OS" == "Linux" ]; then sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7; fi
+          
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+        with: { version: 10 }
       - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
+        with: { node-version: 24, cache: pnpm }
       - uses: dtolnay/rust-toolchain@1.98.0
-        with:
-          components: rustfmt, clippy
+        with: { components: rustfmt, clippy }
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
 
-      - name: Compile
+      - name: Compile Modules
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -126,7 +78,7 @@ jobs:
           EOF
           node patch.cjs
 
-      - name: Stage Tor and Build
+      - name: Build
         run: |
           pnpm stage:tor
           pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
@@ -138,21 +90,29 @@ jobs:
           path: ${{ matrix.packages }}
 
   release:
-    name: Publish GitHub release
-    needs: [gate, package]
-    if: always() && needs.gate.outputs.publish == 'true'
+    name: Publish Release
+    needs: package
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: { contents: write }
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-      - name: Publish
+          
+      - name: Publish Force
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ needs.gate.outputs.version }}"
-          gh release upload "$tag" release-assets/* --clobber || \
-          gh release create "$tag" release-assets/* --title "WhiteAesther $tag" --generate-notes
+          # استخراج نسخه از فایل اصلی
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          
+          # ساخت ریلیز به زور (اگر بود آپلود، اگر نبود کریت)
+          echo "Publishing version $tag..."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber
+          else
+            gh release create "$tag" release-assets/* --title "WhiteAesther $tag" --notes "Automated Build $tag"
+          fi
