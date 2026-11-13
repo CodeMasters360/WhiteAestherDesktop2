@@ -26,14 +26,20 @@ jobs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with: { repository: WhiteDNS/WhiteAesther }
+      - name: Check out upstream
+        uses: actions/checkout@v4
+        with:
+          repository: WhiteDNS/WhiteAesther
+
       - id: decide
+        name: Determine Version and Publish Status
         shell: bash
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          
           if [[ "${GITHUB_REF}" == refs/tags/v* ]] || [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           elif [[ "${GITHUB_REF}" == "refs/heads/main" ]] && ! gh release view "v${version}" >/dev/null 2>&1; then
@@ -67,9 +73,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with: { repository: WhiteDNS/WhiteAesther }
+        with:
+          repository: WhiteDNS/WhiteAesther
       - uses: actions/checkout@v4
-        with: { repository: WhiteDNS/WhiteAestherMobile, ref: ${{ env.AETHER_REVISION }}, path: aether-source }
+        with:
+          repository: WhiteDNS/WhiteAestherMobile
+          ref: ${{ env.AETHER_REVISION }}
+          path: aether-source
 
       - name: Build Setup
         run: |
@@ -77,11 +87,15 @@ jobs:
           if [ "$RUNNER_OS" == "Linux" ]; then sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7; fi
       
       - uses: pnpm/action-setup@v4
-        with: { version: 10 }
+        with:
+          version: 10
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: pnpm }
+        with:
+          node-version: 24
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@1.98.0
-        with: { components: rustfmt, clippy }
+        with:
+          components: rustfmt, clippy
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
 
@@ -98,17 +112,17 @@ jobs:
       - name: Patch stage-tor.mjs
         shell: bash
         run: |
-          cat << 'EOF' > patch-tor.js
+          cat << 'EOF' > patch.js
           const fs = require('fs');
-          let content = fs.readFileSync('scripts/stage-tor.mjs', 'utf8');
-          content = content.replace(/const VERSION = "[^"]+"/, 'const VERSION = "16.0.1"');
-          content = content.replace(/if \(actual !== expected\)/g, 'if (false)');
-          content = content.replace(/fetch\((url[^)]*)\)/g, 'fetch($1, { headers: { "User-Agent": "Mozilla/5.0" } })');
-          fs.writeFileSync('scripts/stage-tor.mjs', content);
+          let c = fs.readFileSync('scripts/stage-tor.mjs', 'utf8');
+          c = c.replace(/const VERSION = "[^"]+"/, 'const VERSION = "16.0.1"');
+          c = c.replace(/if \(actual !== expected\)/g, 'if (false)');
+          c = c.replace(/fetch\((url[^)]*)\)/g, 'fetch($1, { headers: { "User-Agent": "Mozilla/5.0" } })');
+          fs.writeFileSync('scripts/stage-tor.mjs', c);
           EOF
-          node patch-tor.js
+          node patch.js
 
-      - name: Stage and Build
+      - name: Stage Tor and Build
         run: |
           pnpm stage:tor
           pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
@@ -124,12 +138,16 @@ jobs:
     needs: [gate, package]
     if: always() && needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    permissions: { contents: write }
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: release-assets, merge-multiple: true }
+        with:
+          path: release-assets
+          merge-multiple: true
       - name: Publish
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           tag="v${{ needs.gate.outputs.version }}"
           gh release upload "$tag" release-assets/* --clobber || \
