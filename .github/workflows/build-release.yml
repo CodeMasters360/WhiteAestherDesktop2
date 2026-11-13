@@ -112,7 +112,7 @@ jobs:
       - name: Patch stage-tor.mjs
         shell: bash
         run: |
-          cat << 'EOF' > patch.js
+          cat << 'EOF' > patch.cjs
           const fs = require('fs');
           let c = fs.readFileSync('scripts/stage-tor.mjs', 'utf8');
           c = c.replace(/const VERSION = "[^"]+"/, 'const VERSION = "16.0.1"');
