@@ -9,6 +9,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: whiteaesther-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   AETHER_REVISION: 2409297365e23e3fd320a87c0da73d0656bee67c
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
@@ -36,26 +40,41 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-        with: { repository: WhiteDNS/WhiteAesther }
-      - uses: actions/checkout@v4
-        with: { repository: WhiteDNS/WhiteAestherMobile, ref: ${{ env.AETHER_REVISION }}, path: aether-source }
+      - name: Check out upstream WhiteAesther
+        uses: actions/checkout@v4
+        with:
+          repository: WhiteDNS/WhiteAesther
 
-      - name: Prepare and Compile
+      - name: Check out pinned Aether core
+        uses: actions/checkout@v4
+        with:
+          repository: WhiteDNS/WhiteAestherMobile
+          ref: 2409297365e23e3fd320a87c0da73d0656bee67c
+          path: aether-source
+
+      - name: Prepare Core
+        run: node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          node scripts/prepare-core.mjs --checkout aether-source --destination aether-core
-          if [ "$RUNNER_OS" == "Linux" ]; then sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7; fi
-          
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf cmake ninja-build perl pkg-config clang rpm libarchive-tools xdg-utils libevent-2.1-7
+      
       - uses: pnpm/action-setup@v4
-        with: { version: 10 }
+        with:
+          version: 10
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: pnpm }
+        with:
+          node-version: 24
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@1.98.0
-        with: { components: rustfmt, clippy }
+        with:
+          components: rustfmt, clippy
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
 
-      - name: Compile Modules
+      - name: Compile Core and Carriers
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -78,7 +97,7 @@ jobs:
           EOF
           node patch.cjs
 
-      - name: Build
+      - name: Stage Tor and Build
         run: |
           pnpm stage:tor
           pnpm tauri build --verbose --bundles "${{ matrix.bundles }}"
@@ -90,29 +109,25 @@ jobs:
           path: ${{ matrix.packages }}
 
   release:
-    name: Publish Release
+    name: Publish GitHub release
     needs: package
     runs-on: ubuntu-latest
-    permissions: { contents: write }
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-          
-      - name: Publish Force
+
+      - name: Force Release to Latest
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # استخراج نسخه از فایل اصلی
-          version="$(node -p "require('./package.json').version")"
-          tag="v${version}"
-          
-          # ساخت ریلیز به زور (اگر بود آپلود، اگر نبود کریت)
-          echo "Publishing version $tag..."
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release-assets/* --clobber
+          # اگر ریلیز وجود داشته باشد فایل‌ها را با clobber جایگزین و آپدیت می‌کند، در غیر این صورت ریلیز latest می‌سازد
+          if gh release view "latest" >/dev/null 2>&1; then
+            gh release upload "latest" release-assets/* --clobber
           else
-            gh release create "$tag" release-assets/* --title "WhiteAesther $tag" --notes "Automated Build $tag"
+            gh release create "latest" release-assets/* --title "Latest Build" --notes "Automated latest build."
           fi
