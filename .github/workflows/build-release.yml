@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned commit revision for the mobile core backend
+  # Fallback revision for the mobile core backend
   AETHER_REVISION: 6e2ade9e86c5f66194c66e6be1e23b40677c2db2
   # Statically link CRT for BoringSSL on Windows
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
@@ -90,12 +90,46 @@ jobs:
           repository: WhiteDNS/WhiteAesther
           ref: main
 
-      # Check out pinned Aether mobile core with full commit history
+      # Dynamically resolve the expected core commit hash from upstream files
+      - name: Resolve pinned Aether core revision
+        id: resolve-core
+        shell: bash
+        run: |
+          REVISION=$(node -e '
+            const fs = require("fs");
+            const path = require("path");
+            let rev = "";
+            for (const dir of [".", "scripts"]) {
+              if (!fs.existsSync(dir)) continue;
+              for (const f of fs.readdirSync(dir)) {
+                if (f.endsWith(".json")) {
+                  try {
+                    const j = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+                    if (j && typeof j.revision === "string" && /^[0-9a-f]{40}$/i.test(j.revision)) {
+                      rev = j.revision;
+                      break;
+                    }
+                  } catch {}
+                }
+              }
+              if (rev) break;
+            }
+            if (!rev && fs.existsSync("scripts/prepare-core.mjs")) {
+              const code = fs.readFileSync("scripts/prepare-core.mjs", "utf8");
+              const m = code.match(/[0-9a-f]{40}/);
+              if (m) rev = m[0];
+            }
+            console.log(rev || "${{ env.AETHER_REVISION }}");
+          ')
+          echo "revision=${REVISION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved core revision: ${REVISION}"
+
+      # Check out pinned Aether mobile core with full commit history using resolved revision
       - name: Check out the pinned Aether core
         uses: actions/checkout@v4
         with:
           repository: WhiteDNS/WhiteAestherMobile
-          ref: ${{ env.AETHER_REVISION }}
+          ref: ${{ steps.resolve-core.outputs.revision }}
           path: aether-source
           fetch-depth: 0
 
@@ -165,7 +199,7 @@ jobs:
 
       - name: Compile the Aether core
         env:
-          AETHER_BUILD_REVISION: ${{ env.AETHER_REVISION }}
+          AETHER_BUILD_REVISION: ${{ steps.resolve-core.outputs.revision }}
         run: cargo build --release --locked --manifest-path aether-core/aether/Cargo.toml
 
       - name: Stage the target-specific Aether sidecar
